@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from types import MethodType
-from typing import Any, Callable
+from typing import Callable
 import asyncio
-import inspect
 
 
 __all__ = (
@@ -97,17 +96,17 @@ class ListenerClass:
         self.callback = callback
 
 
-class ListenerClass2:
-    def __init__(self, listen_for: str | type, callback: Callable):
-        self.listen_for = listen_for
-        self.callback: Callable = callback
-        self.self_arg = None
-
-    async def __call__(self, *args, **kwargs):
-        if self.self_arg:
-            await self.callback(self.self_arg, *args, **kwargs)
-        else:
-            await self.callback(*args, **kwargs)
+# class ListenerClass2:
+#     def __init__(self, listen_for: str | type, callback: Callable):
+#         self.listen_for = listen_for
+#         self.callback: Callable = callback
+#         self.self_arg = None
+#
+#     async def __call__(self, *args, **kwargs):
+#         if self.self_arg:
+#             await self.callback(self.self_arg, *args, **kwargs)
+#         else:
+#             await self.callback(*args, **kwargs)
 
 
 class WaitForCheck:
