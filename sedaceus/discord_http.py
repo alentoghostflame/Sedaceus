@@ -188,6 +188,7 @@ class RateLimitHandler:
             json: dict | None = None,
             headers: dict | None = None,
     ) -> aiohttp.ClientResponse:
+        # TODO: Add None bucket RateLimit for handling Global rate limits. 50 per second and 10k errors every 10 mins.
         if not self.session:
             self.session = aiohttp.ClientSession(base_url=self._base_url)
 
@@ -207,7 +208,9 @@ class RateLimitHandler:
             used_headers = self._forced_headers
 
         retry_count = 5  # To prevent infinite loops.
-        while 0 <= retry_count:
+
+        # The loop is to allow migration to a different RateLimit object if needed.
+        while 0 <= retry_count:  # If we hit this loop retry_count times, something is wrong.
             try:
                 async with rate_limit:
                     response = await self.session.request(
@@ -241,12 +244,16 @@ class RateLimitHandler:
 
                     rate_limit.update(response)
                     if rate_limit.bucket in self.buckets and self.buckets[rate_limit.bucket] is not rate_limit:
+                        # If the current RateLimit bucket name exists, but the stored RateLimit is not the current
+                        #  RateLimit, finish up and signal that the current bucket should be migrated to the stored one.
                         logger.debug(
                             "%s %s has bucket %s that already exists, migrating other possible tasks to that bucket."
                         )
                         correct_rate_limit = self.buckets[rate_limit.bucket]
+                        # Signals to all tasks waiting to acquire to migrate.
                         rate_limit.migrate_to(correct_rate_limit.bucket)
                         self.url_rate_limits[rate_limit_url] = correct_rate_limit
+                        # Update the correct RateLimit object with our findings.
                         correct_rate_limit.update(response)
                     elif rate_limit.bucket:
                         self.buckets[rate_limit.bucket] = rate_limit
@@ -264,27 +271,6 @@ class RateLimitHandler:
 
         if retry_count <= 0:
             logger.error("Retry count for %s %s hit 0 or less, what's going on?", method, url)
-
-        # async with self.url_rate_limits[url]:
-        #     response = await self.session.request(
-        #         method=method,
-        #         url=url,
-        #         params=params,
-        #         json=json,
-        #         headers=used_headers,
-        #     )
-        #     match response.status:
-        #         case 401:
-        #             logger.warning("Method %s on URL %s resulted in a 401, maybe get a valid auth token?", method, url)
-        #         case 403:
-        #             logger.warning("Method %s on URL %s resulted in a 403, perhaps check your permissions?", method, url)
-        #         case 404:
-        #             logger.warning("Method %s on URL %s resulted in a 404, adding to url_deny_list.", method, url)
-        #             self.url_deny_list.add(url)
-        #         case 429:  # TODO: Have RateLimits with matching buckets be merged.
-        #             logger.warning("Method %s on URL %s resulted in a 429, possibly rate limit better?", method, url)
-        #
-        #     self.url_rate_limits[url].update(response)
 
         return response
 
