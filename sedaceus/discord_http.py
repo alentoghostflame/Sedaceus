@@ -14,7 +14,7 @@ __all__ = (
 
 USER_AGENT = "DiscordBot (www.doesnt.yet/exist/Sedaceus, 0.1)"
 
-TIMER_ERROR_ADD_ON = 0.1
+TIMER_ERROR_ADD_ON = 0.4
 
 
 logger = getLogger(__name__)
@@ -28,7 +28,7 @@ class RateLimit:
     limit: int
     remaining: int
     reset: datetime | None
-    reset_after: float | None
+    reset_after: float
     bucket: str | None
 
     # _remaining: int
@@ -38,11 +38,11 @@ class RateLimit:
     _deny: bool
     _migrating: str | None
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.limit = 1
         self.remaining = 1
         self.reset = None
-        self.reset_after = None
+        self.reset_after = 1
         self.bucket = None
 
         # self._remaining = self.remaining
@@ -56,7 +56,7 @@ class RateLimit:
         variable should be set to the different RateLimit/buckets string name.
         """
 
-    def update(self, response: aiohttp.ClientResponse):
+    def update(self, response: aiohttp.ClientResponse) -> None:
         if response.status == 404:
             self._deny = True
 
@@ -87,16 +87,10 @@ class RateLimit:
         x_bucket = response.headers.get("X-RateLimit-Bucket")
         self.bucket = x_bucket
 
-        if (not self._reset_remaining_task or self._reset_remaining_task.done()) and self.reset_after:
-            loop = asyncio.get_running_loop()
-            if self.reset_after:
-                logger.debug("Bucket %s on path %s will reset after %s seconds.", self.bucket, response.url, self.reset_after)
-                self._reset_remaining_task = loop.create_task(self.reset_remaining(self.reset_after))
-            else:
-                logger.warning("Bucket %s on path %s has no reset_after, resetting immediately.", self.bucket, response.url)
-                self._reset_remaining_task = loop.create_task(self.reset_remaining(0))
+        if not self._reset_remaining_task or self._reset_remaining_task.done():
+            self.start_reset_task()
 
-        if 0 < self.remaining:
+        if 0 < self.remaining and not self._on_reset_event.is_set():
             logger.debug("Bucket %s updated with remaining %s, setting reset event.", self.bucket, self.remaining)
             self._on_reset_event.set()
 
@@ -105,43 +99,50 @@ class RateLimit:
             self.bucket, self.limit, self.remaining, self.reset, self.reset_after,
         )
 
-    async def reset_remaining(self, time: float):
+    def start_reset_task(self):
+        loop = asyncio.get_running_loop()
+        logger.debug("Bucket %s will reset after %s seconds.", self.bucket, self.reset_after)
+        self._reset_remaining_task = loop.create_task(self.reset_remaining(self.reset_after))
+
+    async def reset_remaining(self, time: float) -> None:
         await asyncio.sleep(time)
-        logger.debug("Bucket %s is resetting and setting the event.")
         self.remaining = self.limit
         self._on_reset_event.set()
+        logger.debug("Bucket %s is reset.", self.bucket)
 
     @property
     def migrating(self) -> str | None:
         return self._migrating
 
-    def migrate_to(self, bucket: str):
-        logger.debug("Bucket %s is being deprecated and will migrate to a new bucket.")
+    def migrate_to(self, bucket: str) -> None:
         self._migrating = bucket
         self.remaining = self.limit
         self._on_reset_event.set()
+        logger.debug("Bucket %s is deprecated and acquiring tasks will migrate to a new bucket.")
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> None:
         await self.acquire()
         return None
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         self.release()
 
     def locked(self) -> bool:
         return self.remaining <= 0
 
-    async def acquire(self):
-        if self.remaining <= 0:
-            logger.warning("Bucket %s has hit the remaining limit of %s, locking until reset.", self.bucket, self.limit)
+    async def acquire(self) -> bool:
+        if self.remaining <= 0 and self._on_reset_event.is_set():
+            logger.info("Bucket %s has hit the remaining limit of %s, locking until reset.", self.bucket, self.limit)
             self._on_reset_event.clear()
 
         while not self._on_reset_event.is_set():
             logger.debug("Bucket %s is not set, waiting for it to be set.", self.bucket)
             await self._on_reset_event.wait()
 
-            if self.remaining <= 0:
-                logger.warning("Bucket %s has hit the remaining limit of %s, locking until reset.", self.bucket, self.limit)
+            if self.remaining <= 0 and self._on_reset_event.is_set():
+                logger.info(
+                    "Bucket %s has hit the remaining limit of %s, locking until reset.", self.bucket, self.limit
+                )
                 self._on_reset_event.clear()
 
         if self.migrating:
@@ -153,12 +154,25 @@ class RateLimit:
         self.remaining -= 1
         return True
 
-    def release(self):
+    def release(self) -> None:
+        pass
+
+
+class GlobalRateLimit(RateLimit):
+    async def acquire(self) -> bool:
+        ret = await super().acquire()
+        if not self._reset_remaining_task or self._reset_remaining_task.done():
+            self.start_reset_task()
+
+        return ret
+
+    async def update(self, response: aiohttp.ClientResponse) -> None:
         pass
 
 
 class RateLimitHandler:
-    buckets: dict[str, RateLimit]  # "BucketName": Ratelimit. RateLimits with no bucket name are not included.
+    buckets: dict[str | None, RateLimit]  # "BucketName": Ratelimit. RateLimits with no bucket name are not included.
+    # The None RateLimit is for global usage.
     url_rate_limits: dict[tuple[str, str], RateLimit]  # ("POST", "/guilds/{guild_id}/channels"): RateLimit
     url_deny_list: set[tuple[str, str]]  # Paths that result in a 404. These will immediately raise an error
     #  if encountered again.
@@ -169,9 +183,12 @@ class RateLimitHandler:
 
     def __init__(
             self,
+            *,
             base_url: str | None = None,
             forced_headers: dict[str, str] = {"User-Agent": USER_AGENT},
-    ):
+            max_per_interval: int = 50,
+            interval_time: int | float = 1
+    ) -> None:
         self.buckets = {}
         self.url_rate_limits = {}
         self.url_deny_list = set()
@@ -179,6 +196,17 @@ class RateLimitHandler:
 
         self._base_url = base_url
         self._forced_headers = forced_headers
+
+        self.setup_global_rate_limit(max_per_interval, interval_time)
+
+    def setup_global_rate_limit(self, max_per_interval: int, interval_time: int | float) -> None:
+        rate_limit = GlobalRateLimit()
+        rate_limit.limit = max_per_interval
+        rate_limit.remaining = max_per_interval
+        rate_limit.reset_after = interval_time + TIMER_ERROR_ADD_ON
+        rate_limit.bucket = "Global"
+
+        self.buckets[None] = rate_limit
 
     async def request(
             self,
@@ -210,67 +238,76 @@ class RateLimitHandler:
         retry_count = 5  # To prevent infinite loops.
 
         # The loop is to allow migration to a different RateLimit object if needed.
-        while 0 <= retry_count:  # If we hit this loop retry_count times, something is wrong.
-            try:
-                async with rate_limit:
-                    response = await self.session.request(
-                        method=method,
-                        url=url,
-                        params=params,
-                        json=json,
-                        headers=used_headers,
-                    )
-                    match response.status:
-                        case 401:
-                            logger.warning(
-                                "URL %s resulted in a 401, maybe get a valid auth token?", rate_limit_url
-                            )
-                        case 403:
-                            logger.warning(
-                                "URL %s resulted in a 403, perhaps check your permissions?", rate_limit_url
-                            )
-                        case 404:
-                            logger.warning(
-                                "URL %s resulted in a 404, adding to url_deny_list.", rate_limit_url
-                            )
-                            self.url_deny_list.add(rate_limit_url)
-                            raise ValueError(
-                                f"The given URL resulted in a 404 and was added to the deny list."
-                            )
-                        case 429:  # TODO: Have RateLimits with matching buckets be merged.
-                            logger.warning(
-                                "Method %s on URL %s resulted in a 429, possibly rate limit better?", method, url
-                            )
-
-                    rate_limit.update(response)
-                    if rate_limit.bucket in self.buckets and self.buckets[rate_limit.bucket] is not rate_limit:
-                        # If the current RateLimit bucket name exists, but the stored RateLimit is not the current
-                        #  RateLimit, finish up and signal that the current bucket should be migrated to the stored one.
-                        logger.debug(
-                            "%s %s has bucket %s that already exists, migrating other possible tasks to that bucket."
+        async with self.buckets[None]:
+            while 0 <= retry_count:  # If we hit this loop retry_count times, something is wrong.
+                should_retry = False
+                try:
+                    async with rate_limit:
+                        response = await self.session.request(
+                            method=method,
+                            url=url,
+                            params=params,
+                            json=json,
+                            headers=used_headers,
                         )
-                        correct_rate_limit = self.buckets[rate_limit.bucket]
-                        # Signals to all tasks waiting to acquire to migrate.
-                        rate_limit.migrate_to(correct_rate_limit.bucket)
-                        self.url_rate_limits[rate_limit_url] = correct_rate_limit
-                        # Update the correct RateLimit object with our findings.
-                        correct_rate_limit.update(response)
-                    elif rate_limit.bucket:
-                        self.buckets[rate_limit.bucket] = rate_limit
 
-            except RateLimitMigrating:
-                rate_limit = self.buckets.get(rate_limit.migrating)
-                if rate_limit is None:
-                    raise TypeError("RateLimit said to migrate, but the RateLimit to migrate to was not found?")
+                        rate_limit.update(response)
+                        if rate_limit.bucket is not None and \
+                                rate_limit.bucket in self.buckets and \
+                                self.buckets[rate_limit.bucket] is not rate_limit:
+                            # If the current RateLimit bucket name exists, but the stored RateLimit is not the current
+                            #  RateLimit, finish up and signal that the current bucket should be migrated to the
+                            #  stored one.
+                            logger.debug(
+                                "%s has bucket %s that already exists, migrating other possible tasks to that bucket.",
+                                rate_limit_url, rate_limit.bucket
+                            )
+                            correct_rate_limit = self.buckets[rate_limit.bucket]
+                            # Signals to all tasks waiting to acquire to migrate.
+                            rate_limit.migrate_to(correct_rate_limit.bucket)
+                            self.url_rate_limits[rate_limit_url] = correct_rate_limit
+                            # Update the correct RateLimit object with our findings.
+                            correct_rate_limit.update(response)
+                        elif rate_limit.bucket:
+                            self.buckets[rate_limit.bucket] = rate_limit
 
-            else:
-                break
+                        match response.status:
+                            case 401:
+                                logger.warning(
+                                    "URL %s resulted in a 401, maybe get a valid auth token?", rate_limit_url
+                                )
+                            case 403:
+                                logger.warning(
+                                    "URL %s resulted in a 403, perhaps check your permissions?", rate_limit_url
+                                )
+                            case 404:
+                                logger.warning(
+                                    "URL %s resulted in a 404, adding to url_deny_list.", rate_limit_url
+                                )
+                                self.url_deny_list.add(rate_limit_url)
+                                raise ValueError(
+                                    f"The given URL resulted in a 404 and was added to the deny list."
+                                )
+                            case 429:  # TODO: Have RateLimits with matching buckets be merged.
+                                logger.warning(
+                                    "URL %s resulted in a 429, possibly rate limit better?", rate_limit_url
+                                )
+                                should_retry = True
 
-            finally:
-                retry_count -= 1
+                except RateLimitMigrating:
+                    rate_limit = self.buckets.get(rate_limit.migrating)
+                    if rate_limit is None:
+                        raise TypeError("RateLimit said to migrate, but the RateLimit to migrate to was not found?")
 
-        if retry_count <= 0:
-            logger.error("Retry count for %s %s hit 0 or less, what's going on?", method, url)
+                else:
+                    if not should_retry:
+                        break
+
+                finally:
+                    retry_count -= 1
+
+            if retry_count <= 0:
+                logger.error("Retry count for %s %s hit 0 or less, what's going on?", method, url)
 
         return response
 
