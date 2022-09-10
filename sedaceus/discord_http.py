@@ -14,7 +14,7 @@ __all__ = (
 
 USER_AGENT = "DiscordBot (www.doesnt.yet/exist/Sedaceus, 0.1)"
 
-TIMER_ERROR_ADD_ON = 0.4
+# TIMER_ERROR_ADD_ON = 0.4
 
 
 logger = getLogger(__name__)
@@ -32,13 +32,14 @@ class RateLimit:
     bucket: str | None
 
     # _remaining: int
+    _time_offset: float
     _first_update: bool
     _reset_remaining_task: asyncio.Task | None
     _on_reset_event: asyncio.Event
     _deny: bool
     _migrating: str | None
 
-    def __init__(self) -> None:
+    def __init__(self, time_offset: float = 0.3) -> None:
         self.limit = 1
         self.remaining = 1
         self.reset = None
@@ -46,6 +47,7 @@ class RateLimit:
         self.bucket = None
 
         # self._remaining = self.remaining
+        self._time_offset = time_offset
         self._first_update = True
         self._reset_remaining_task = None
         self._on_reset_event = asyncio.Event()
@@ -78,7 +80,7 @@ class RateLimit:
 
         x_reset_after = response.headers.get("X-RateLimit-Reset-After")
         if x_reset_after is not None:
-            x_reset_after = float(x_reset_after) + TIMER_ERROR_ADD_ON
+            x_reset_after = float(x_reset_after) + self._time_offset
             if self.reset_after is None:
                 self.reset_after = x_reset_after
             else:
@@ -180,6 +182,7 @@ class RateLimitHandler:
 
     _base_url: str | None
     _forced_headers: dict[str, str]
+    _time_offset: float
 
     def __init__(
             self,
@@ -187,7 +190,8 @@ class RateLimitHandler:
             base_url: str | None = None,
             forced_headers: dict[str, str] = {"User-Agent": USER_AGENT},
             max_per_interval: int = 50,
-            interval_time: int | float = 1
+            interval_time: int | float = 1,
+            time_offset: float = 0.2,
     ) -> None:
         self.buckets = {}
         self.url_rate_limits = {}
@@ -196,6 +200,7 @@ class RateLimitHandler:
 
         self._base_url = base_url
         self._forced_headers = forced_headers
+        self._time_offset = time_offset
 
         self.setup_global_rate_limit(max_per_interval, interval_time)
 
@@ -203,7 +208,7 @@ class RateLimitHandler:
         rate_limit = GlobalRateLimit()
         rate_limit.limit = max_per_interval
         rate_limit.remaining = max_per_interval
-        rate_limit.reset_after = interval_time + TIMER_ERROR_ADD_ON
+        rate_limit.reset_after = interval_time + self._time_offset
         rate_limit.bucket = "Global"
 
         self.buckets[None] = rate_limit
@@ -225,7 +230,7 @@ class RateLimitHandler:
         if rate_limit_url in self.url_deny_list:
             raise ValueError(f"The given URL has already resulted in a 404 and was added to the deny list.")
         if rate_limit_url not in self.url_rate_limits:
-            logger.debug("URL %s doesn't have a RateLimit yet, creating.", rate_limit_url)
+            logger.critical("URL %s doesn't have a RateLimit yet, creating.", rate_limit_url)
             self.url_rate_limits[rate_limit_url] = RateLimit()
 
         rate_limit = self.url_rate_limits[rate_limit_url]
@@ -243,6 +248,8 @@ class RateLimitHandler:
                 should_retry = False
                 try:
                     async with rate_limit:
+                        # logger.warning("ALL CURRENT BUCKETS: %s\n%s", self.buckets, self.url_rate_limits)
+                        # logger.info("Current bucket: %s", rate_limit)
                         response = await self.session.request(
                             method=method,
                             url=url,
@@ -268,7 +275,7 @@ class RateLimitHandler:
                             self.url_rate_limits[rate_limit_url] = correct_rate_limit
                             # Update the correct RateLimit object with our findings.
                             correct_rate_limit.update(response)
-                        elif rate_limit.bucket:
+                        elif rate_limit.bucket is not None:
                             self.buckets[rate_limit.bucket] = rate_limit
 
                         match response.status:
