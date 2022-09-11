@@ -12,7 +12,7 @@ __all__ = (
 )
 
 
-USER_AGENT = "DiscordBot (www.doesnt.yet/exist/Sedaceus, 0.1)"
+USER_AGENT = "DiscordBot (https://github.com/alentoghostflame/Sedaceus, 0.1)"
 
 # TIMER_ERROR_ADD_ON = 0.4
 
