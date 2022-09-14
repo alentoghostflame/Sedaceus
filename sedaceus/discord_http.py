@@ -148,7 +148,7 @@ class RateLimit:
         self._migrating = bucket
         self.remaining = self.limit
         self._on_reset_event.set()
-        logger.debug("Bucket %s is deprecated and acquiring requests will migrate to a new bucket.")
+        logger.debug("Bucket %s is deprecated and acquiring requests will migrate to a new bucket.", bucket)
 
     async def __aenter__(self) -> None:
         await self.acquire()
