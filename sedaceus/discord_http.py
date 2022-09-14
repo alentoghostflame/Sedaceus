@@ -73,7 +73,10 @@ class RateLimit:
 
         # Updates the remaining left if it exists, being pessimistic.
         x_remaining = response.headers.get("X-RateLimit-Remaining")
-        if x_remaining is None:
+
+        if response.status == 429:
+            self.remaining = 0
+        elif x_remaining is None:
             self.remaining = 1
         elif self._first_update:
             self.remaining = int(x_remaining)
