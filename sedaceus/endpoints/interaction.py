@@ -40,12 +40,12 @@ def verify_discord_signature(public_key: str, signature: str, timestamp: str, bo
 class InteractionEndpoint:
     _public_key: str | None
     _route: str | None
-    event_dispatcher: DispatchFramework
+    # event_dispatcher: DispatchFramework
 
     def __init__(self):
         self._public_key = None
         self._route = None
-        self.event_dispatcher = DispatchFramework()
+        self.events: DispatchFramework = DispatchFramework()
 
     def _verify_from_headers(self, headers: CIMultiDictProxy, body: str) -> bool:
         try:
@@ -64,10 +64,15 @@ class InteractionEndpoint:
                 logger.debug("Verified Discord signature headers, continuing.")
                 interaction: InteractionData = await request.json()
                 if interaction.get("type") == 1:
-                    self.event_dispatcher.dispatch("ping", request, interaction)
+                    self.events.dispatch("ping", request, interaction)
                 else:
-                    self.event_dispatcher.dispatch("interaction", request, interaction)
+                    self.events.dispatch("interaction", request, interaction)
 
+                await asyncio.sleep(5)
+                # TODO: Returning `None` immediately will cause aiohttp to automatically close the request when control
+                #  is given back to the event loop, thus allowing aiohttp to process it. This sleep buys at least 5
+                #  seconds of time before the request is auto-closed, but there needs to be a way to stop aiohttp
+                #  from "helpfully" auto-closing it.
                 return None
             else:
                 logger.debug("Failed Discord signature headers, returning 401.")
@@ -102,7 +107,7 @@ class InteractionEndpoint:
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", port)
-        self.event_dispatcher.add_listener(self.handle_ping, "ping")
+        self.events.add_listener(self.handle_ping, "ping")
         await site.start()
         logger.info("%s listening on %s on route %s", self.__class__.__name__, site.name, self._route)
 
