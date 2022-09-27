@@ -58,8 +58,7 @@ class OAuth2Endpoint:
     async def _on_interaction_incoming(self, request: web.Request) -> web.Response | None:
         pass
 
-    def middleware(self, public_key: str, route: str = DEFAULT_ROUTE, strip_slash: bool = True):
-        # self._public_key = public_key
+    def middleware(self, route: str = DEFAULT_ROUTE, strip_slash: bool = True):
         self._route = route.strip("/") if strip_slash else route
 
         @web.middleware
