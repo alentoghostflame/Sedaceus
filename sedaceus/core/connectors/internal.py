@@ -96,19 +96,6 @@ class ListenerClass:
         self.callback = callback
 
 
-# class ListenerClass2:
-#     def __init__(self, listen_for: str | type, callback: Callable):
-#         self.listen_for = listen_for
-#         self.callback: Callable = callback
-#         self.self_arg = None
-#
-#     async def __call__(self, *args, **kwargs):
-#         if self.self_arg:
-#             await self.callback(self.self_arg, *args, **kwargs)
-#         else:
-#             await self.callback(*args, **kwargs)
-
-
 class WaitForCheck:
     def __init__(self, future: asyncio.Future, check: Callable[..., bool]):
         self.future: asyncio.Future = future
@@ -200,92 +187,6 @@ class DispatchFramework:
 
         for listener in self.__permanent_listeners__.get(event, set()):
             loop.create_task(listener(*args, **kwargs))
-
-
-# class DispatchFramework2:
-#     # __added_listeners__: Dict[Union[str, type], Set[ListenerClass]]
-#     __permanent_listeners__: dict[str | type, set[ListenerClass2]]
-#     # __temp_listeners__: Dict[Union[str, type], Set[WaitForCheck]]
-#     __temporary_listeners__: dict[str | type, set[WaitForCheck]]
-#
-#     def __new__(cls, *args, **kwargs):
-#         new_cls = super(DispatchFramework2, cls).__new__(cls)
-#         new_cls._discover_listeners()
-#         return new_cls
-#
-#     def _discover_listeners(self):
-#         self.__permanent_listeners__ = {}
-#         self.__temporary_listeners__ = {}
-#         for base in reversed(self.__class__.__mro__):
-#             for elem, value in base.__dict__.items():
-#                 is_static_method = isinstance(value, staticmethod)
-#                 if is_static_method:
-#                     value = value.__func__
-#                 if isinstance(value, ListenerClass2):
-#                     if not self.__permanent_listeners__.get(value.listen_for):
-#                         self.__permanent_listeners__[value.listen_for] = set()
-#                     value.self_arg = self
-#                     self.__permanent_listeners__[value.listen_for].add(value)
-#
-#     def add_listener(
-#             self,
-#             listener: ListenerClass2 | Callable,
-#             listen_for: str | None = None
-#     ):
-#         if inspect.ismethod(listener):
-#             if listen_for is None:
-#                 raise ValueError("When given listener is a method, listen_for must be provided.")
-#             listener = ListenerClass2(listen_for=listen_for, callback=listener)
-#         elif isinstance(listener, ListenerClass2):
-#             pass
-#
-#         if not self.__added_listeners__.get(listener.listen_for):
-#             self.__added_listeners__[listener.listen_for] = set()
-#
-#         self.__added_listeners__[listener.listen_for].add(listener)
-#
-#     def dispatch(self, to_dispatch: Union[str, type], *args, **kwargs):
-#         loop = asyncio.get_running_loop()
-#         if to_dispatch in self.__temp_listeners__:
-#             listeners = self.__temp_listeners__[to_dispatch].copy()
-#             for listener in listeners:
-#                 if listener.future.cancelled():
-#                     self.__temp_listeners__[to_dispatch].remove(listener)
-#                 else:
-#                     try:
-#                         result = listener.check(*args, **kwargs)
-#                     except Exception as e:
-#                         listener.future.set_exception(e)
-#                     else:
-#                         if result:
-#                             if len(args) == 0:
-#                                 listener.future.set_result(None)
-#                             elif len(args) == 1:
-#                                 listener.future.set_result(args[0])
-#                             else:
-#                                 listener.future.set_result(args)
-#
-#                             self.__temp_listeners__[to_dispatch].remove(listener)
-#
-#         for listener in self.__added_listeners__.get(to_dispatch, set()):
-#             loop.create_task(listener(*args, **kwargs))
-#
-#     def wait_for(
-#             self,
-#             event: type | str,
-#             check: Callable[..., bool] | None = None,
-#             timeout: float | None = None
-#     ) -> Any:
-#         future = asyncio.get_running_loop().create_future()
-#         if not check:
-#             def _check(*args, **kwargs):
-#                 return True
-#             check = _check
-#         if event not in self.__temp_listeners__:
-#             self.__temp_listeners__[event] = set()
-#
-#         self.__temp_listeners__[event].add(WaitForCheck(future, check))
-#         return asyncio.wait_for(future, timeout)
 
 
 def listen(listen_for: str | type):
