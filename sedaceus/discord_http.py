@@ -62,10 +62,20 @@ class RateLimit:
         variable should be set to the different RateLimit/buckets string name.
         """
 
-    def update(self, response: aiohttp.ClientResponse) -> None:
+    async def update(self, response: aiohttp.ClientResponse) -> None:
         """Updates the rate limit with information found in the response. Specifically the headers."""
+
+        if (response.headers.get("X-RateLimit-Global") or response.headers.get("x-ratelimit-global")) in (True, "true"):
+            # The response is intended for the global rate limit, not a regular rate limit.
+            return
+
         if response.status == 404:
             self._deny = True
+        # elif response.status == 429:
+        #     # We hit a rate limit, time to clean up.
+        #     self.remaining = 0
+        #     data =
+        #     if (reset_after := )
 
         # Updates the limit if it exists.
         x_limit = response.headers.get("X-RateLimit-Limit")
@@ -74,9 +84,7 @@ class RateLimit:
         # Updates the remaining left if it exists, being pessimistic.
         x_remaining = response.headers.get("X-RateLimit-Remaining")
 
-        if response.status == 429:
-            self.remaining = 0
-        elif x_remaining is None:
+        if x_remaining is None:
             self.remaining = 1
         elif self._first_update:
             self.remaining = int(x_remaining)
@@ -200,15 +208,40 @@ class GlobalRateLimit(RateLimit):
     """
     async def acquire(self) -> bool:
         ret = await super().acquire()
-        # As updates no longer occur, it will start the reset task as soon as the first request has acquired.
+        # As updates are little weird, it's best to start the reset task as soon as the first request has acquired.
         if not self._reset_remaining_task or self._reset_remaining_task.done():
             self.start_reset_task()
 
         return ret
 
     async def update(self, response: aiohttp.ClientResponse) -> None:
-        # The global rate limit doesn't need to be updated. Perhaps with more testing, it will be required?
-        pass
+        # if response.status == 429:
+        #     logger.critical(response.headers)
+        #     logger.critical(response.headers.get("X-RateLimit-Global") or response.headers.get("x-ratelimit-global"))
+        if (
+                response.headers.get("X-RateLimit-Global") or response.headers.get("x-ratelimit-global")
+        ) not in (True, "true"):
+            # The response is intended for the regular rate limit, not a global rate limit.
+            return
+
+        if response.status == 429:
+            # Oh dear, we hit the rate limit.
+            logger.warning("Global rate limit 429 encountered, setting remaining to 0.")
+            self.remaining = 0
+            data = await response.json()
+            logger.critical(data)
+            if response.headers.get("X-RateLimit-Scope") == "global":
+                if (retry_after := data.get("retry_after")) or (retry_after := response.headers.get("Retry-After")):
+                    logger.debug("Got global retry_after, resetting global after %s seconds", retry_after)
+                    self.reset_after = float(retry_after) + self._time_offset
+                    if self._reset_remaining_task and not self._reset_remaining_task.done():
+                        self._reset_remaining_task.cancel()
+
+                    self.start_reset_task()
+
+
+            self._on_reset_event.clear()
+            logger.critical("Cleared global ratelimit, waiting for reset.")
 
 
 class RateLimitHandler:
@@ -318,12 +351,13 @@ class RateLimitHandler:
         retry_count = 5  # To prevent infinite loops.
 
         # The loop is to allow migration to a different RateLimit object if needed.
-        async with self.buckets[None]:
-            # If we hit this loop retry_count times, something is wrong. Either we keep migrating buckets, or 429s keep
-            #  getting hit.
-            while 0 <= retry_count:
-                should_retry = False
-                try:
+        # If we hit this loop retry_count times, something is wrong. Either we keep migrating buckets, or 429s keep
+        #  getting hit.
+        # TODO: Comment out all of this and restructure the global rate limit to be better integrated.
+        while 0 <= retry_count:
+            should_retry = False
+            try:
+                async with self.buckets[None]:
                     async with rate_limit:
                         response = await self.session.request(
                             method=method,
@@ -333,7 +367,9 @@ class RateLimitHandler:
                             headers=used_headers,
                         )
 
-                        rate_limit.update(response)
+                        await rate_limit.update(response)
+                        await self.buckets[None].update(response)
+
                         if rate_limit.bucket is not None and \
                                 rate_limit.bucket in self.buckets and \
                                 self.buckets[rate_limit.bucket] is not rate_limit:
@@ -350,7 +386,7 @@ class RateLimitHandler:
                             rate_limit.migrate_to(correct_rate_limit.bucket)
                             self.url_rate_limits[rate_limit_url] = correct_rate_limit
                             # Update the correct RateLimit object with our findings.
-                            correct_rate_limit.update(response)
+                            await correct_rate_limit.update(response)
                         elif rate_limit.bucket is not None:
                             self.buckets[rate_limit.bucket] = rate_limit
 
@@ -376,21 +412,24 @@ class RateLimitHandler:
                                 logger.warning(
                                     "URL %s resulted in a 429, possibly rate limit better?", rate_limit_url
                                 )
+                                logger.warning(await response.read())
+                                # logger.warning(response.headers)
                                 should_retry = True
 
-                except RateLimitMigrating:
-                    rate_limit = self.buckets.get(rate_limit.migrating)
-                    if rate_limit is None:
-                        raise ValueError("RateLimit said to migrate, but the RateLimit to migrate to was not found?")
+            except RateLimitMigrating:
+                rate_limit = self.buckets.get(rate_limit.migrating)
+                if rate_limit is None:
+                    raise ValueError("RateLimit said to migrate, but the RateLimit to migrate to was not found?")
 
-                else:
-                    if not should_retry:
-                        break
+            else:
+                if not should_retry:
+                    break
 
-                finally:
-                    retry_count -= 1
+            finally:
+                retry_count -= 1
 
             if retry_count <= 0:
                 logger.error("Retry count for %s %s hit 0 or less, what's going on?", method, url)
+                break
 
         return response
