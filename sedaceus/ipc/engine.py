@@ -175,10 +175,13 @@ class InboundConnection:
     async def send_pickled(self, data, force_pickle=False) -> None:
         raise NotImplementedError
 
+    async def send_httplike(self, data) -> HTTPOverWSRequest:
+        raise NotImplementedError
+
     async def receive(self) -> Any:
         raise NotImplementedError
 
-    async def send_httplike(self, data) -> HTTPOverWSRequest:
+    async def close(self):
         raise NotImplementedError
 
     async def __aenter__(self):
@@ -213,6 +216,9 @@ class OutboundConnection:
     async def receive(self) -> Any:
         raise NotImplementedError
 
+    async def close(self):
+        raise NotImplementedError
+
     async def __aenter__(self):
         raise NotImplementedError
 
@@ -243,6 +249,9 @@ class LocalInboundConnection(InboundConnection, LocalConnection):
 
     async def receive(self) -> Any:
         return await LocalConnection.receive(self)
+
+    async def close(self):
+        return await LocalConnection.close(self)
 
     async def __aenter__(self):
         return await LocalConnection.__aenter__(self)
@@ -281,6 +290,9 @@ class LocalOutboundConnection(OutboundConnection, LocalConnection):
 
     async def receive(self) -> Any:
         return await LocalConnection.receive(self)
+
+    async def close(self):
+        return await LocalConnection.close(self)
 
     async def __aenter__(self):
         return await LocalConnection.__aenter__(self)
@@ -367,6 +379,7 @@ class IPCEngine:
         self.session: aiohttp.ClientSession | None = None
 
         self.events.add_listener(self.on_engine_ready, "engine_ready")
+        self.events.add_listener(self.on_engine_closing, "engine_closing")
 
     def propagate_event(self, event, args: list[Any] = [], kwargs: dict[str, Any] = {}):
         self.events.dispatch(event, *args, **kwargs)
@@ -399,6 +412,14 @@ class IPCEngine:
     async def on_engine_ready(self):
         logger.debug("IPC Engine is ready.")
 
+    async def on_engine_closing(self):
+        logger.debug("IPC Engine is closing.")
+
+    async def close(self, closing_time: float = 1.0):
+        self.propagate_event("engine_closing")
+        await self.session.close()
+        await asyncio.sleep(closing_time)
+
     async def start(self, *, port: int = 8080):
         self.assign_engine_to_all()
         self.session = aiohttp.ClientSession()
@@ -411,7 +432,7 @@ class IPCEngine:
         logger.info("%s listening on %s.", self.__class__.__name__, site.name)
         self.propagate_event("engine_ready")
 
-    def run(self, *, loop: asyncio.AbstractEventLoop | None = None, port: int = 8080):
+    def run(self, *, loop: asyncio.AbstractEventLoop | None = None, port: int = 8080, closing_time: float = 1.0):
         loop = loop or asyncio.new_event_loop()
         task = loop.create_task(self.start(port=port))
         try:
@@ -419,6 +440,10 @@ class IPCEngine:
         except KeyboardInterrupt:
             logger.debug("KeyboardInterrupt encountered, stopping loop.")
             task.cancel()
-            if self.session:
-                loop.create_task(self.session.close())
-            loop.run_until_complete(asyncio.sleep(0.1))
+            loop.run_until_complete(self.close(closing_time))
+
+            # if self.session:
+            #     loop.create_task(self.session.close())
+            # self.propagate_event("engine_closing")
+            # loop.run_until_complete(asyncio.sleep(0))
+            # loop.run_until_complete(asyncio.sleep(closing_time))
