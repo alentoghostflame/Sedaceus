@@ -5,13 +5,19 @@ from typing import Any, TYPE_CHECKING
 import asyncio
 import pickle
 
-from .core import HTTPOverWSRequest, HTTPOverWSResponse, InboundConnection, OutboundConnection
+from .core import HTTPOverWSRequest, InboundConnection, OutboundConnection
 
 from ..core import DispatchFramework
 
 
 if TYPE_CHECKING:
     from .engine import IPCEngine, DeviceRole, IPCDevice
+
+
+__all__ = (
+    "LocalInboundConnection",
+    "LocalOutboundConnection",
+)
 
 
 class LocalConnection:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from types import MethodType
 from typing import Callable
 import asyncio
@@ -126,20 +127,28 @@ class DispatchFramework:
                     base.__dict__[elem] = MethodType(value.event, self)
                     self.__permanent_listeners__[value.event].add(base.__dict__[elem])
 
-    def add_listener(self, func: ListenerClass | Callable, event: str | type | None = None):
+    def add_listener(self, func: ListenerClass | Callable, event: str | type | Enum):
         if isinstance(func, ListenerClass):
             event = event or func.event
             func = func.callback
-
-        if event is None:
-            raise ValueError("A listener can't listen for everything, listen_for must be provided.")
 
         if event not in self.__permanent_listeners__:
             self.__permanent_listeners__[event] = set()
 
         self.__permanent_listeners__[event].add(func)
 
-    def listen(self, event: str | type | None = None):
+    def remove_listener(self, func: ListenerClass | Callable, event: str | type | Enum) -> bool:
+        if isinstance(func, ListenerClass):
+            event = event or func.event
+            func = func.callback
+
+        if func in self.__permanent_listeners__.get(event, set()):
+            self.__permanent_listeners__[event].remove(func)
+            return True
+        else:
+            return False
+
+    def listen(self, event: str | type | Enum | None = None):
         def wrapper(func: Callable):
             name = event or func.__name__
             self.add_listener(func=func, event=name)
@@ -147,7 +156,7 @@ class DispatchFramework:
 
         return wrapper
 
-    def wait_for(self, event: type | str, check: Callable[..., bool] | None = None, timeout: float | None = None):
+    def wait_for(self, event: type | str | Enum, check: Callable[..., bool] | None = None, timeout: float | None = None):
         future = asyncio.get_running_loop().create_future()
         if not check:
             def _check(*args, **kwargs):
@@ -161,7 +170,7 @@ class DispatchFramework:
         self.__temporary_listeners__[event].add(WaitForCheck(future, check))
         return asyncio.wait_for(future, timeout=timeout)
 
-    def dispatch(self, event: type | str, *args, **kwargs):
+    def dispatch(self, event: type | str | Enum, *args, **kwargs):
         loop = asyncio.get_running_loop()
         if event in self.__temporary_listeners__:
             temp_listeners = self.__temporary_listeners__[event].copy()
@@ -189,7 +198,7 @@ class DispatchFramework:
             loop.create_task(listener(*args, **kwargs))
 
 
-def listen(listen_for: str | type):
+def listen(listen_for: str | type | Enum):
     def wrapper(func: Callable):
         if asyncio.iscoroutinefunction(func):
             ret = ListenerClass(listen_for, func)

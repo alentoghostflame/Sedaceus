@@ -81,7 +81,7 @@ class InboundConnection:
 
 class OutboundConnection:
     connected: bool
-    target_role: DeviceRole
+    target_role: DeviceRole | None
 
     async def connect(self, target_role: DeviceRole) -> None:
         raise NotImplementedError
