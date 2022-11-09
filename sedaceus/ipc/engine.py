@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import aiohttp
 import asyncio
-import pickle
 import uuid
 
 from aiohttp import web
-from enum import Enum, IntEnum, unique
 from logging import getLogger
-from typing import Any, AsyncIterator, Coroutine, Type
+from typing import Coroutine, TYPE_CHECKING
 
-from .core import InboundConnection, OutboundConnection, HTTPOverWSRequest, HTTPOverWSResponse
-from .local import LocalOutboundConnection
+from .connection import IPCConnection, IPCPacket
+from .enums import EngineEvents, IPCClassType, IPCPayloadType
 
-from ..core import DispatchFramework, listen
+from ..core import DispatchFramework
+
+
+if TYPE_CHECKING:
+    from .device import Device
+    from .role import Role
+
+
+__all__ = (
+    "ConnectionMap",
+    "IPCEngine",
+)
 
 
 # WS_ROLE_PATH = "/ws/role/{}"
@@ -29,292 +38,6 @@ logger = getLogger(__name__)
 CONNECT_RETRY_SLEEP = 10  # Time in seconds.
 ENGINE_DISCOVERY_ROUTE = "discovery"
 ENGINE_IPC_ROUTE = "engine/ipc"
-
-
-@unique
-class IPCPayloadType(IntEnum):
-    COMMUNICATION = 0
-    """Valid destination: ENGINE, ROLE, DEVICE
-    
-    
-    Packet data: IPCPacket dictionary
-    """
-    DISCOVERY = 1
-    """Valid destination: ENGINE
-    
-    Packet data: "Node UUID"
-    """
-    ROLE_ADD = 2
-    """Valid destination: ENGINE
-
-    Packet data: "Role name here"
-    """
-    ROLE_REMOVE = 3
-    """Valid destination: ENGINE
-    
-    Packet data: "Role name here"
-    """
-    DEVICE_ADD = 4
-    """Valid destination: ENGINE
-    
-    Packet data: {"uuid": "Device UUID Here", "role": "Role name here"}
-    """
-    DEVICE_REMOVE = 5
-    """Valid destination: ENGINE
-
-    Packet data: {"uuid": "Device UUID Here", "role": "Role name here"}
-    """
-
-
-@unique
-class IPCClassType(IntEnum):
-    ENGINE = 0
-    ROLE = 1
-    DEVICE = 2
-
-
-class IPCPacket:
-    def __init__(
-            self,
-            *,
-            payload_type: IPCPayloadType,
-            origin_type: IPCClassType,
-            origin_name: str | None,
-            origin_role: str | None,
-            dest_type: IPCClassType,
-            dest_name: str | None,
-            data: str | dict | bytes,
-            event: str | None = None,
-    ):
-        self.type = payload_type
-        self.origin_type = origin_type
-        """IPC Class Type that the packet is being sent from."""
-        self.origin_name = origin_name
-        """Role name for Role origin, Device UUID for Device origin, node UUID for Engine origin."""
-        self.origin_role = origin_role
-        """Role name of the Device for Device origin. None for Role and Engine origin."""
-        self.destination_type = dest_type
-        """IPC Class Type that the packet is being sent to."""
-        self.destination_name = dest_name
-        """Role name for Role origin, Device UUID for Device origin, node UUID for Engine origin."""
-        self.data = data
-        self.event = event
-
-    def to_dict(self) -> dict:
-        ret = {
-            "type": self.type.value,
-            "origin_type": self.origin_type.value,
-            "origin_name": self.origin_name,
-            "origin_role": self.origin_role,
-            "destination_type": self.destination_type.value,
-            "destination_name": self.destination_name,
-            "data": self.data,
-            "event": self.event,
-        }
-        return ret
-
-    @classmethod
-    def from_dict(cls, packet: dict) -> IPCPacket:
-        ret = cls(
-            payload_type=IPCPayloadType(packet["type"]),
-            origin_type=IPCClassType(packet["origin_type"]),
-            origin_name=packet["origin_name"],
-            origin_role=packet["origin_role"],
-            dest_type=IPCClassType(packet["destination_type"]),
-            dest_name=packet["destination_name"],
-            data=packet["data"],
-            event=packet["event"],
-        )
-        return ret
-
-
-class IPCConnection:
-    class ConnectionClosed(Exception):
-        pass
-
-    def __init__(
-            self,
-            engine: IPCEngine,
-            conn: web.WebSocketResponse | aiohttp.ClientWebSocketResponse | None,
-            origin_type: IPCClassType,
-            origin_name: str | None,
-            origin_role: str | None,
-            dest_node: str | None,
-            dest_type: IPCClassType,
-            dest_name: str | None,
-            # attempt_reconnect: bool = True
-    ):
-        self._engine = engine
-        self._conn = conn
-        self._origin_type = origin_type
-        self._origin_name = origin_name
-        self._origin_role = origin_role
-        self._dest_node = dest_node
-        self._dest_type = dest_type
-        self._dest_name = dest_name
-        # self._attempt_reconnect = attempt_reconnect
-
-        self._open: bool = False
-
-        # self._waiting_for_reconnect: asyncio.Event = asyncio.Event()
-        # self._waiting_for_reconnect.set()
-        self._packet_queue: asyncio.Queue[IPCPacket | None] = asyncio.Queue()
-
-    @property
-    def is_open(self) -> bool:
-        return self._open
-
-    async def open(self):
-        if self._open is False:
-            self._open = True
-            self._engine.events.add_listener(self.on_ipc_communication, IPCEngine.Events.COMMUNICATION)
-            self._engine.events.add_listener(self._on_engine_close, IPCEngine.Events.ENGINE_CLOSING)
-
-    async def close(self):
-        if self._open is True:
-            self._open = False
-            self._engine.events.remove_listener(self.on_ipc_communication, "ipc_communication")
-            self._engine.events.remove_listener(self._on_engine_close, "engine_closing")
-            await self._packet_queue.put(None)
-
-    async def _on_engine_close(self):
-        await self.close()
-
-    async def send(self, data: Any):
-        if not self.is_open:
-            raise self.ConnectionClosed("The IPC connection has been closed.")
-
-        packet = IPCPacket(
-            payload_type=IPCPayloadType.COMMUNICATION,
-            origin_type=self._origin_type,
-            origin_name=self._origin_name,
-            origin_role=self._origin_role,
-            dest_type=self._dest_type,
-            dest_name=self._dest_name,
-            data=data
-        )
-        if self._conn is None:
-            self._engine.events.dispatch("ipc_communication", packet, self._origin_name)
-        else:
-            try:
-                await self._conn.send_json(packet.to_dict())
-            except Exception as e:
-                logger.debug(
-                    "%s error when communicating with node %s, closing connection.",
-                    e.__class__,
-                    self._dest_node
-                )
-                await self.close()
-                raise self.ConnectionClosed("The IPC connection has been closed.")
-
-    async def receive(self) -> IPCPacket | None:
-        if self._conn is not None and self._conn.closed:
-            raise self.ConnectionClosed("The IPC connection has been closed.")
-
-        ret = await self._packet_queue.get()
-        self._packet_queue.task_done()
-        if ret is None:
-            raise self.ConnectionClosed("The IPC connection has been closed.")
-
-        return ret
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await self.close()
-
-    def __aiter__(self) -> AsyncIterator[IPCPacket]:
-        return self
-
-    async def __anext__(self) -> IPCPacket:
-        if self._open:
-            try:
-                return await self.receive()
-            except self.ConnectionClosed:
-                raise StopAsyncIteration
-
-        else:
-            raise StopAsyncIteration
-
-    async def on_ipc_communication(self, packet: IPCPacket, origin_node: str | None):
-        # logger.debug(
-        #     "Packet type: %s, dest_type: %s, dest_name: %s\n Our dest_type: %s, our dest_name: %s",
-        #     packet.type, packet.destination_type, packet.destination_name, self._origin_type, self._origin_name
-        # )
-        if (
-                packet.type is IPCPayloadType.COMMUNICATION and
-                packet.destination_type is self._origin_type and
-                packet.destination_name == self._origin_name
-        ):
-            await self._packet_queue.put(packet)
-
-
-class Device:
-    def __init__(self, uuid_override: str | None = None):
-        self.events: DispatchFramework = DispatchFramework()
-        self._uuid: str = uuid_override or uuid.uuid1().hex
-        self._engine: IPCEngine | None = None
-        """Set when the Device is added to an Engine."""
-        self._role: Role | None = None
-        """Set when the Device is added to a Role."""
-
-    @property
-    def role(self) -> Role | None:
-        return self._role
-
-    def set_role(self, role: Role):
-        self._role = role
-
-    @property
-    def engine(self) -> IPCEngine | None:
-        return self._engine
-
-    def set_engine(self, engine: IPCEngine):
-        self._engine = engine
-
-    @property
-    def uuid(self) -> str:
-        return self._uuid
-
-
-class Role:
-    def __init__(self, name: str):
-        self.events: DispatchFramework = DispatchFramework()
-        # self._uuid: str = uuid_override or uuid.uuid1().hex
-        self._name: str = name
-        self._engine: IPCEngine | None = None
-        """Set with the Role is added to an Engine."""
-        self._devices: dict[str, Device] = {}
-        """{"Device UUID": Device}"""
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def engine(self) -> IPCEngine | None:
-        return self._engine
-
-    def set_engine(self, engine: IPCEngine):
-        self._engine = engine
-        for device in self._devices.values():
-            if device.engine is None:
-                device.set_engine(engine)
-
-    @property
-    def devices(self) -> dict[str, Device]:
-        return self._devices.copy()
-
-    def add_device(self, device: Device):
-        if device.uuid in self._devices and self._devices[device.uuid] is not device:
-            raise ValueError(f"Device with UUID {device.uuid} has already been added to this role.")
-
-        self._devices[device.uuid] = device
-        if self._engine is not None:
-            device.set_engine(self.engine)
-
-        device.set_role(self)
 
 
 class ConnectionMap:
@@ -534,31 +257,8 @@ class ConnectionMap:
         return ret
 
 
+# TODO: You need to subclass DispatchFramework for @listen to work, dummy.
 class IPCEngine:
-
-    class Events(Enum):
-        # Base Engine Events
-        ENGINE_READY = "ENGINE_READY"
-        ENGINE_CLOSING = "ENGINE_CLOSING"
-        # Node addition/removal.
-        WS_NODE_ADDED = "WS_NODE_ADDED"
-        NODE_ADDED = "NODE_ADDED"
-        WS_NODE_REMOVED = "WS_NODE_REMOVED"
-        NODE_REMOVED = "NODE_REMOVED"
-        # Role addition/removal.
-        WS_ROLE_ADDED = "WS_ROLE_ADDED"
-        LOCAL_ROLE_ADDED = "LOCAL_ROLE_ADDED"
-        ROLE_ADDED = "ROLE_ADDED"
-        WS_ROLE_REMOVED = "WS_ROLE_REMOVED"
-        LOCAL_ROLE_REMOVED = "LOCAL_ROLE_REMOVED"
-        ROLE_REMOVED = "ROLE_REMOVED"
-        # Device addition/removal.
-        # Packet handling.
-        WS_PACKET = "WS_PACKET"
-        LOCAL_PACKET = "LOCAL_PACKET"
-        PACKET = "PACKET"
-        COMMUNICATION = "COMMUNICATION"
-
     def __init__(self, uuid_override: str | None = None):
         self.events: DispatchFramework = DispatchFramework()
         self._uuid: str = uuid_override or uuid.uuid1().hex
@@ -568,32 +268,31 @@ class IPCEngine:
         self.map: ConnectionMap = ConnectionMap(self)
         self.session: aiohttp.ClientSession | None = None
 
-        self.events.add_listener(self.on_engine_ready, self.Events.ENGINE_READY)
-        self.events.add_listener(self.on_engine_closing, self.Events.ENGINE_CLOSING)
+        self.events.add_listener(self.on_engine_ready, EngineEvents.ENGINE_READY)
+        self.events.add_listener(self.on_engine_closing, EngineEvents.ENGINE_CLOSING)
 
-        self.events.add_listener(self.on_ws_node_added, self.Events.WS_NODE_ADDED)
-        self.events.add_listener(self.on_node_added, self.Events.NODE_ADDED)
-        self.events.add_listener(self.on_ws_node_removed, self.Events.WS_NODE_REMOVED)
-        self.events.add_listener(self.on_node_removed, self.Events.NODE_REMOVED)
+        self.events.add_listener(self.on_ws_node_added, EngineEvents.WS_NODE_ADDED)
+        self.events.add_listener(self.on_node_added, EngineEvents.NODE_ADDED)
+        self.events.add_listener(self.on_ws_node_removed, EngineEvents.WS_NODE_REMOVED)
+        self.events.add_listener(self.on_node_removed, EngineEvents.NODE_REMOVED)
 
-        self.events.add_listener(self.on_ws_role_added, self.Events.WS_ROLE_ADDED)
-        self.events.add_listener(self.on_local_role_added, self.Events.LOCAL_ROLE_ADDED)
-        self.events.add_listener(self.on_role_added, self.Events.ROLE_ADDED)
-        self.events.add_listener(self.on_ws_role_removed, self.Events.WS_ROLE_REMOVED)
-        self.events.add_listener(self.on_local_role_removed, self.Events.LOCAL_ROLE_REMOVED)
-        self.events.add_listener(self.on_role_removed, self.Events.ROLE_REMOVED)
+        self.events.add_listener(self.on_ws_role_added, EngineEvents.WS_ROLE_ADDED)
+        self.events.add_listener(self.on_local_role_added, EngineEvents.LOCAL_ROLE_ADDED)
+        self.events.add_listener(self.on_role_added, EngineEvents.ROLE_ADDED)
+        self.events.add_listener(self.on_ws_role_removed, EngineEvents.WS_ROLE_REMOVED)
+        self.events.add_listener(self.on_local_role_removed, EngineEvents.LOCAL_ROLE_REMOVED)
+        self.events.add_listener(self.on_role_removed, EngineEvents.ROLE_REMOVED)
 
-        self.events.add_listener(self.on_ws_packet, self.Events.WS_PACKET)
-        self.events.add_listener(self.on_local_packet, self.Events.LOCAL_PACKET)
-        self.events.add_listener(self.on_packet, self.Events.PACKET)
-        self.events.add_listener(self.on_communication, self.Events.COMMUNICATION)
+        self.events.add_listener(self.on_ws_packet, EngineEvents.WS_PACKET)
+        self.events.add_listener(self.on_local_packet, EngineEvents.LOCAL_PACKET)
+        self.events.add_listener(self.on_packet, EngineEvents.PACKET)
+        self.events.add_listener(self.on_communication, EngineEvents.COMMUNICATION)
 
     @property
     def uuid(self) -> str:
         return self._uuid
 
     def discovery_payload(self) -> IPCPacket:
-        logger.critical("Generating Discovery Payload.")
         ret = IPCPacket(
             payload_type=IPCPayloadType.DISCOVERY,
             origin_type=IPCClassType.ENGINE,
@@ -610,7 +309,7 @@ class IPCEngine:
         task = loop.create_task(coroutine)
         while True:
             try:
-                await self.events.wait_for(self.Events.ENGINE_CLOSING, timeout=timeout)
+                await self.events.wait_for(EngineEvents.ENGINE_CLOSING, timeout=timeout)
             except asyncio.TimeoutError:
                 pass
             else:
@@ -627,7 +326,7 @@ class IPCEngine:
     async def quick_send_to(self, uuid_or_name: str, packet: IPCPacket):
         node_uuid, conn = self.map.resolve_conn(uuid_or_name)
         if conn is None:
-            self.events.dispatch(self.Events.LOCAL_PACKET, packet)
+            self.events.dispatch(EngineEvents.LOCAL_PACKET, packet)
         else:
             await conn.send_json(packet.to_dict())
 
@@ -662,7 +361,7 @@ class IPCEngine:
                                 if self.map.add_node(ws, node_uuid):
                                     logger.debug("Node %s sent a discovery, dispatching event.", node_uuid)
                                     discovered_node = True
-                                    self.events.dispatch(self.Events.WS_NODE_ADDED, ws, node_uuid)
+                                    self.events.dispatch(EngineEvents.WS_NODE_ADDED, ws, node_uuid)
                                 else:
                                     logger.debug(
                                         "Node %s is already connected to us. Closing outgoing connection.", node_uuid
@@ -672,7 +371,7 @@ class IPCEngine:
                             elif discovered_node is False:
                                 logger.debug("Non-discovery JSON message received before a discovery one, discarding.")
                             else:
-                                self.events.dispatch(self.Events.WS_PACKET, ws, packet, node_uuid)
+                                self.events.dispatch(EngineEvents.WS_PACKET, ws, packet, node_uuid)
                         else:
                             logger.debug("Unhandled non-text message received, discarding.")
 
@@ -746,7 +445,7 @@ class IPCEngine:
                             else:
                                 logger.debug("Incoming Node %s sent a discovery, dispatching event.", node_uuid)
                                 discovered_node = True
-                                self.events.dispatch(self.Events.WS_NODE_ADDED, ws, node_uuid)  # TODO: Make ws_ipc_node_added?
+                                self.events.dispatch(EngineEvents.WS_NODE_ADDED, ws, node_uuid)  # TODO: Make ws_ipc_node_added?
                         else:
                             logger.debug(
                                 "Incoming Node %s is already connected to us, closing incoming connection.", node_uuid
@@ -757,37 +456,27 @@ class IPCEngine:
                         logger.debug("Non-discovery JSON message was sent before a discovery one, ignoring.")
                     else:
                         # logger.debug("Incoming Node %s sent a message, dispatching.", node_uuid)
-                        self.events.dispatch(self.Events.WS_PACKET, ws, packet, node_uuid)
+                        self.events.dispatch(EngineEvents.WS_PACKET, ws, packet, node_uuid)
 
         logger.warning("Incoming connection closed cleanly, perhaps you should dispatch something someday?")
 
         return ws
 
-    # async def on_ws_ipc_message(
-    #         self,
-    #         ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse,
-    #         node_uuid: str,
-    #         packet: IPCPacket,
-    # ):
-    #     self.events.dispatch("ipc_message", node_uuid, packet)
-
-    # @listen(Events.ENGINE_READY)
     async def on_engine_ready(self):
         logger.debug("IPC Engine is ready.")
 
-    # @listen(Events.ENGINE_CLOSING)
     async def on_engine_closing(self):
         logger.debug("IPC Engine is closing.")
 
     async def on_ws_node_added(self, ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse, node_uuid: str):
         self.map.add_node(ws, node_uuid)
-        self.events.dispatch(self.Events.NODE_ADDED, node_uuid)
+        self.events.dispatch(EngineEvents.NODE_ADDED, node_uuid)
 
     async def on_node_added(self, node_uuid: str):
         logger.info("Node added: %s", node_uuid)
 
     async def on_ws_node_removed(self, ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse, node_uuid: str):
-        self.events.dispatch(self.Events.NODE_REMOVED, node_uuid)
+        self.events.dispatch(EngineEvents.NODE_REMOVED, node_uuid)
 
     async def on_node_removed(self, node_uuid: str):
         logger.info("Node removed: %s", node_uuid)
@@ -826,15 +515,15 @@ class IPCEngine:
             packet: IPCPacket,
             node_uuid: str
     ):
-        self.events.dispatch(self.Events.PACKET, packet, node_uuid)
+        self.events.dispatch(EngineEvents.PACKET, packet, node_uuid)
 
     async def on_local_packet(self, packet: IPCPacket):
-        self.events.dispatch(self.Events.PACKET, packet, self.uuid)
+        self.events.dispatch(EngineEvents.PACKET, packet, self.uuid)
 
     async def on_packet(self, packet: IPCPacket, node_uuid: str):
         match packet.type:
             case IPCPayloadType.COMMUNICATION:
-                self.events.dispatch(self.Events.COMMUNICATION, packet, node_uuid)
+                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
             case IPCPayloadType.DISCOVERY:
                 logger.warning("We aren't supposed to be able to handle discovery here?")
             # case IPCPayloadType.ROLE_ADD:
@@ -876,7 +565,7 @@ class IPCEngine:
             await self.propagate_to_nodes(packet)
 
     async def close(self, closing_time: float = 1.0):
-        self.events.dispatch(self.Events.ENGINE_CLOSING)
+        self.events.dispatch(EngineEvents.ENGINE_CLOSING)
         await self.session.close()
         await asyncio.sleep(closing_time)
 
@@ -889,7 +578,7 @@ class IPCEngine:
         await site.start()
         logger.info("%s listening on %s.", self.__class__.__name__, site.name)
 
-        self.events.dispatch(self.Events.ENGINE_READY)
+        self.events.dispatch(EngineEvents.ENGINE_READY)
         if discover_nodes:
             loop = asyncio.get_running_loop()
             for node_address, node_port in discover_nodes:
