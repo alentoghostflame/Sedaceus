@@ -130,9 +130,9 @@ class IPCConnection:
     async def _on_engine_close(self):
         await self.close()
 
-    async def send(self, data: Any):
-        if not self.is_open:
-            raise self.ConnectionClosed("The IPC connection has been closed.")
+    async def send_com(self, data: Any):
+        # if not self.is_open:
+        #     raise self.ConnectionClosed("The IPC connection has been closed.")
 
         packet = IPCPacket(
             payload_type=IPCPayloadType.COMMUNICATION,
@@ -143,6 +143,25 @@ class IPCConnection:
             dest_name=self._dest_name,
             data=data
         )
+        await self.send_packet(packet)
+        # if self._conn is None:
+        #     self._engine.events.dispatch("ipc_communication", packet, self._origin_name)
+        # else:
+        #     try:
+        #         await self._conn.send_json(packet.to_dict())
+        #     except Exception as e:
+        #         logger.debug(
+        #             "%s error when communicating with node %s, closing connection.",
+        #             e.__class__,
+        #             self._dest_node
+        #         )
+        #         await self.close()
+        #         raise self.ConnectionClosed("The IPC connection has been closed.")
+
+    async def send_packet(self, packet: IPCPacket):
+        if not self.is_open:
+            raise self.ConnectionClosed("The IPC connection has been closed.")
+
         if self._conn is None:
             self._engine.events.dispatch("ipc_communication", packet, self._origin_name)
         else:
@@ -169,6 +188,7 @@ class IPCConnection:
         return ret
 
     async def __aenter__(self):
+        await self.open()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):

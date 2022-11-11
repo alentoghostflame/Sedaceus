@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import uuid
 
+from .enums import EngineEvents
 from ..core import DispatchFramework
 
 
@@ -58,3 +59,5 @@ class Role:
             device.set_engine(self.engine)
 
         device.set_role(self)
+        if self.engine and self.engine.running.is_set():
+            self.engine.events.dispatch(EngineEvents.LOCAL_DEVICE_ADDED, device)

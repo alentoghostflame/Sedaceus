@@ -36,7 +36,6 @@ logger = getLogger(__name__)
 
 
 CONNECT_RETRY_SLEEP = 10  # Time in seconds.
-ENGINE_DISCOVERY_ROUTE = "discovery"
 ENGINE_IPC_ROUTE = "engine/ipc"
 
 
@@ -50,10 +49,10 @@ class ConnectionMap:
 
         self._remote_nodes: dict[str, web.WebSocketResponse | aiohttp.ClientWebSocketResponse] = {}
         """{"Node UUID": (Client)WebSocketResponse object}"""
-        self._remote_roles: dict[str, list[str]] = {}
-        """{"Role Name": ["Node UUID 1 with role", "Node UUID 2 with role", ...]}"""
-        self._remote_devices: dict[str, str] = {}
-        """{"Device UUID": "Node UUID"}"""
+        self._remote_roles: dict[str, set[str]] = {}
+        """{"Role Name": {"Node UUID 1", "Node UUID 2", "etc."}}"""
+        self._remote_devices: dict[str, tuple[str, str]] = {}
+        """{"Device UUID": ("Role Name", "Node UUID")}"""
         # TODO: Remote devices need to have their role associated with them. If a role gets added AFTER devices in a
         #  different node were synced, then local role wont know all devices across the network with that role.
         #  {"node_uuid": "foo", "role": "role_name"}
@@ -63,15 +62,15 @@ class ConnectionMap:
         return self._remote_nodes.copy()
 
     @property
-    def remote_roles(self) -> dict[str, list[str]]:
+    def remote_roles(self) -> dict[str, set[str]]:
         return self._remote_roles.copy()
 
     @property
-    def remote_devices(self) -> dict[str, str]:
+    def remote_devices(self) -> dict[str, tuple[str, str]]:
         return self._remote_devices.copy()
 
     @property
-    def local_roles(self) -> set:
+    def local_roles(self) -> set[str]:
         # return self._local_roles.copy()
         return set(self._engine._roles.keys())
 
@@ -115,37 +114,42 @@ class ConnectionMap:
         logger.debug("Fully removing node %s from NodeMap.", rm_node_uuid)
 
         # Removes the node UUID from the dict of remote roles.
-        for node_list in self._remote_roles.values():
+        for role_name, node_list in self._remote_roles.items():
             if rm_node_uuid in node_list:
                 node_list.remove(rm_node_uuid)
+                self._engine.events.dispatch(EngineEvents.EXTERNAL_ROLE_REMOVED, role_name, rm_node_uuid)
 
         # Removes devices from the dict if the node they were attached to is no longer connected.
-        for device_uuid, remote_node_uuid in self.remote_devices:
-            if remote_node_uuid == rm_node_uuid:
+        for device_uuid, role_node in self.remote_devices.items():
+            if role_node[1] == rm_node_uuid:
                 logger.debug("Removing device %s", device_uuid)
                 self._remote_devices.pop(device_uuid)
+                self._engine.events.dispatch(EngineEvents.EXTERNAL_DEVICE_REMOVED, device_uuid, role_node)
 
         # Finally, removes the node UUID and websocket object for it from the dict.
         self._remote_nodes.pop(rm_node_uuid)
+        self._engine.events.dispatch(EngineEvents.NODE_REMOVED, rm_node_uuid)
 
         return True
 
-    # def add_role(self, role_name: str, origin: str | None) -> bool:
-    #     if origin is None:
-    #         if role_name in self._local_roles:
-    #             return False
-    #         else:
-    #             self._local_roles.add(role_name)
-    #             return True
-    #     else:
-    #         if role_name in self._remote_roles and origin in self._remote_roles[role_name]:
-    #             return False
-    #         else:
-    #             if role_name not in self._remote_roles:
-    #                 self._remote_roles[role_name] = []
-    #
-    #             self._remote_roles[role_name].append(role_name)
-    #             return True
+    def add_external_role(self, role_name: str, node_uuid: str):
+        if node_uuid in self._remote_nodes:
+            if role_name not in self._remote_roles:
+                self._remote_roles[role_name] = set()
+
+            self._remote_roles[role_name].add(node_uuid)
+            logger.debug("Added Node %s to list for external role %s", node_uuid, role_name)
+        else:
+            raise ValueError(f"Node UUID {node_uuid} not found, cannot add it to the set for role {role_name}.")
+
+    def add_external_device(self, device_uuid: str, device_role: str, node_uuid: str):
+        if node_uuid in self._remote_nodes:
+            self._remote_devices[device_uuid] = (device_role, node_uuid)
+        else:
+            raise ValueError(
+                f"Node UUID {node_uuid} not found, cannot add device with UUID {device_uuid} and role {device_role}."
+            )
+
     #
     # def add_device(self, device_uuid: str, origin: str | None) -> bool:
     #     if origin is None:
@@ -177,7 +181,7 @@ class ConnectionMap:
         if prefer_self and role_name in self.local_roles:
             return self._engine.uuid, None
         elif role_name in self.remote_roles and len(self.remote_roles[role_name]) > 0:
-            node_uuid = self.remote_roles[role_name][0]
+            node_uuid = list(self.remote_roles[role_name])[0]
             return node_uuid, self.resolve_node_conn(node_uuid)
         else:
             raise ValueError(f"No nodes with Role {role_name} found.")
@@ -188,8 +192,8 @@ class ConnectionMap:
     ) -> tuple[str, aiohttp.ClientWebSocketResponse | web.WebSocketResponse | None]:
         if device_uuid in self.local_devices:
             return self._engine.uuid, None
-        elif node_uuid := self._remote_devices.get(device_uuid):
-            return node_uuid, self._remote_nodes[node_uuid]
+        elif role_node := self._remote_devices.get(device_uuid):
+            return role_node[1], self._remote_nodes[role_node[1]]
         else:
             raise ValueError(f"Device with UUID {device_uuid} not found.")
 
@@ -257,7 +261,6 @@ class ConnectionMap:
         return ret
 
 
-# TODO: You need to subclass DispatchFramework for @listen to work, dummy.
 class IPCEngine:
     def __init__(self, uuid_override: str | None = None):
         self.events: DispatchFramework = DispatchFramework()
@@ -267,6 +270,7 @@ class IPCEngine:
         # self._devices: dict[str, Device] = {}
         self.map: ConnectionMap = ConnectionMap(self)
         self.session: aiohttp.ClientSession | None = None
+        self.running: asyncio.Event = asyncio.Event()
 
         self.events.add_listener(self.on_engine_ready, EngineEvents.ENGINE_READY)
         self.events.add_listener(self.on_engine_closing, EngineEvents.ENGINE_CLOSING)
@@ -276,12 +280,19 @@ class IPCEngine:
         self.events.add_listener(self.on_ws_node_removed, EngineEvents.WS_NODE_REMOVED)
         self.events.add_listener(self.on_node_removed, EngineEvents.NODE_REMOVED)
 
-        self.events.add_listener(self.on_ws_role_added, EngineEvents.WS_ROLE_ADDED)
+        self.events.add_listener(self.on_external_role_added, EngineEvents.EXTERNAL_ROLE_ADDED)
         self.events.add_listener(self.on_local_role_added, EngineEvents.LOCAL_ROLE_ADDED)
         self.events.add_listener(self.on_role_added, EngineEvents.ROLE_ADDED)
-        self.events.add_listener(self.on_ws_role_removed, EngineEvents.WS_ROLE_REMOVED)
+        self.events.add_listener(self.on_external_role_removed, EngineEvents.EXTERNAL_ROLE_REMOVED)
         self.events.add_listener(self.on_local_role_removed, EngineEvents.LOCAL_ROLE_REMOVED)
         self.events.add_listener(self.on_role_removed, EngineEvents.ROLE_REMOVED)
+
+        self.events.add_listener(self.on_external_device_added, EngineEvents.EXTERNAL_DEVICE_ADDED)
+        self.events.add_listener(self.on_local_device_added, EngineEvents.LOCAL_DEVICE_ADDED)
+        self.events.add_listener(self.on_device_added, EngineEvents.DEVICE_ADDED)
+        self.events.add_listener(self.on_external_device_removed, EngineEvents.EXTERNAL_DEVICE_REMOVED)
+        self.events.add_listener(self.on_local_device_removed, EngineEvents.LOCAL_DEVICE_REMOVED)
+        self.events.add_listener(self.on_device_removed, EngineEvents.DEVICE_REMOVED)
 
         self.events.add_listener(self.on_ws_packet, EngineEvents.WS_PACKET)
         self.events.add_listener(self.on_local_packet, EngineEvents.LOCAL_PACKET)
@@ -291,6 +302,19 @@ class IPCEngine:
     @property
     def uuid(self) -> str:
         return self._uuid
+
+    @property
+    def roles(self) -> dict[str, Role]:
+        return self._roles.copy()
+
+    @property
+    def devices(self) -> dict[str, Device]:
+        ret = {}
+        for role in self.roles.values():
+            for dev_uuid, device in role.devices.items():
+                ret[dev_uuid] = device
+
+        return ret
 
     def discovery_payload(self) -> IPCPacket:
         ret = IPCPacket(
@@ -330,11 +354,44 @@ class IPCEngine:
         else:
             await conn.send_json(packet.to_dict())
 
-    async def propagate_to_nodes(self, packet: IPCPacket):
+    async def broadcast_to_nodes(self, packet: IPCPacket):
         for node_uuid, ws in self.map.remote_nodes.items():
             packet.destination_type = IPCClassType.ENGINE
             packet.destination_name = node_uuid
             await ws.send_json(packet.to_dict())
+
+    async def update_node(self, node_uuid: str):
+        ipc_conn = self.map.ipc_to(self, node_uuid)
+        if ipc_conn is None:
+            raise ValueError("Cannot update with self?? What are you trying to do?")
+
+        # This prevents roles/devices added while running through this from breaking anything.
+        current_roles = self.roles
+        current_devices = self.devices
+        async with ipc_conn as conn:
+            for role_name in current_roles:
+                packet = IPCPacket(
+                    payload_type=IPCPayloadType.ROLE_ADD,
+                    origin_type=IPCClassType.ENGINE,
+                    origin_name=self.uuid,
+                    origin_role=None,
+                    dest_type=IPCClassType.ENGINE,
+                    dest_name=node_uuid,
+                    data=role_name,
+                )
+                await conn.send_packet(packet)
+
+            for device_uuid, device in current_devices.items():
+                packet = IPCPacket(
+                    payload_type=IPCPayloadType.DEVICE_ADD,
+                    origin_type=IPCClassType.ENGINE,
+                    origin_name=self.uuid,
+                    origin_role=None,
+                    dest_type=IPCClassType.ENGINE,
+                    dest_name=node_uuid,
+                    data={"uuid": device_uuid, "role": device.role.name},
+                )
+                await conn.send_packet(packet)
 
     async def ipc_ws_connect(self, url: str) -> aiohttp.ClientWebSocketResponse | None:
         ws = None
@@ -376,6 +433,7 @@ class IPCEngine:
                             logger.debug("Unhandled non-text message received, discarding.")
 
                 logger.warning("Outgoing connection closed cleanly, perhaps you should dispatch something someday?")
+                self.map.clean()
 
             except (aiohttp.ClientConnectorError, ConnectionRefusedError) as e:
                 logger.warning(
@@ -445,7 +503,7 @@ class IPCEngine:
                             else:
                                 logger.debug("Incoming Node %s sent a discovery, dispatching event.", node_uuid)
                                 discovered_node = True
-                                self.events.dispatch(EngineEvents.WS_NODE_ADDED, ws, node_uuid)  # TODO: Make ws_ipc_node_added?
+                                self.events.dispatch(EngineEvents.WS_NODE_ADDED, ws, node_uuid)
                         else:
                             logger.debug(
                                 "Incoming Node %s is already connected to us, closing incoming connection.", node_uuid
@@ -459,6 +517,7 @@ class IPCEngine:
                         self.events.dispatch(EngineEvents.WS_PACKET, ws, packet, node_uuid)
 
         logger.warning("Incoming connection closed cleanly, perhaps you should dispatch something someday?")
+        self.map.clean()
 
         return ws
 
@@ -467,13 +526,15 @@ class IPCEngine:
 
     async def on_engine_closing(self):
         logger.debug("IPC Engine is closing.")
+        self.running.clear()
 
     async def on_ws_node_added(self, ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse, node_uuid: str):
         self.map.add_node(ws, node_uuid)
         self.events.dispatch(EngineEvents.NODE_ADDED, node_uuid)
 
     async def on_node_added(self, node_uuid: str):
-        logger.info("Node added: %s", node_uuid)
+        logger.info("Node %s added.", node_uuid)
+        await self.update_node(node_uuid)
 
     async def on_ws_node_removed(self, ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse, node_uuid: str):
         self.events.dispatch(EngineEvents.NODE_REMOVED, node_uuid)
@@ -481,33 +542,90 @@ class IPCEngine:
     async def on_node_removed(self, node_uuid: str):
         logger.info("Node removed: %s", node_uuid)
 
-    async def on_ws_role_added(
+    async def on_external_role_added(
             self,
-            ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse,
             packet: IPCPacket,
             node_uuid: str
     ):
-        pass
+        # logger.debug("Node %s informed us of role %s, adding.", node_uuid, packet.data)
+        self.map.add_external_role(packet.data, node_uuid)
 
     async def on_local_role_added(self, role: Role):
-        pass
+        self.events.dispatch(EngineEvents.ROLE_ADDED, role.name, self.uuid)
+        if self.session:
+            packet = IPCPacket(
+                payload_type=IPCPayloadType.ROLE_ADD,
+                origin_type=IPCClassType.ENGINE,
+                origin_name=self.uuid,
+                origin_role=None,
+                dest_type=IPCClassType.ENGINE,
+                dest_name=None,
+                data=role.name
+            )
+            await self.broadcast_to_nodes(packet)
 
     async def on_role_added(self, role_name: str, node_uuid: str):
-        pass
+        logger.debug("Node %s now has role %s", node_uuid, role_name)
 
-    async def on_ws_role_removed(
+    async def on_external_role_removed(
             self,
-            ws: web.WebSocketResponse | aiohttp.ClientWebSocketResponse,
             packet: IPCPacket | str,
             node_uuid: str
     ):
-        pass
+        if isinstance(packet, IPCPacket):
+            role_name = packet.data
+        elif isinstance(packet, str):
+            role_name = node_uuid
+        else:
+            logger.warning("Unhandled type %s for packet variable", type(packet))
+            return
+
+        self.events.dispatch(EngineEvents.ROLE_REMOVED, role_name, node_uuid)
 
     async def on_local_role_removed(self, role: Role):
-        pass
+        self.events.dispatch(EngineEvents.ROLE_REMOVED, role.name, self.uuid)
 
     async def on_role_removed(self, role_name: str, node_uuid: str):
-        pass
+        logger.debug("Node %s removed role %s.", node_uuid, role_name)
+
+    async def on_external_device_added(self, packet: IPCPacket, node_uuid: str):
+        device_uuid = packet.data["uuid"]
+        device_role = packet.data["role"]
+        logger.debug("Node %s informed us of device %s with role %s, adding.", node_uuid, device_uuid, device_role)
+        self.map.add_external_device(device_uuid, device_role, node_uuid)
+        self.events.dispatch(EngineEvents.DEVICE_ADDED, device_uuid, device_role, node_uuid)
+
+    async def on_local_device_added(self, device: Device):
+        self.events.dispatch(EngineEvents.DEVICE_ADDED, device.uuid, device.role.name, self.uuid)
+        if self.session:
+            packet = IPCPacket(
+                payload_type=IPCPayloadType.DEVICE_ADD,
+                origin_type=IPCClassType.ENGINE,
+                origin_name=self.uuid,
+                origin_role=None,
+                dest_type=IPCClassType.ENGINE,
+                dest_name=None,
+                data={"uuid": device.uuid, "role": device.role.name}
+            )
+            await self.broadcast_to_nodes(packet)
+
+    async def on_device_added(self, device_uuid: str, device_role: str, node_uuid: str):
+        logger.debug("New device %s with role %s from node %s added.", device_uuid, device_role, node_uuid)
+
+    async def on_external_device_removed(self, packet: IPCPacket | str, node_uuid: str | tuple[str, str]):
+        if isinstance(packet, IPCPacket) and isinstance(node_uuid, str):
+            device_role = packet.data
+            self.events.dispatch(EngineEvents.DEVICE_REMOVED, device_role[0], device_role[1], node_uuid)
+        elif isinstance(packet, str) and isinstance(node_uuid, tuple):
+            self.events.dispatch(EngineEvents.DEVICE_REMOVED, packet, node_uuid[0], node_uuid[1])
+        else:
+            logger.warning("Unhandled packet and node_uuid type combination: %s %s", type(packet), type(node_uuid))
+
+    async def on_local_device_removed(self, device: Device):
+        self.events.dispatch(EngineEvents.DEVICE_REMOVED, device.uuid, device.role.name, self.uuid)
+
+    async def on_device_removed(self, device_uuid: str, device_role: str, node_uuid: str):
+        logger.debug("Node %s removed device %s with role %s.", node_uuid, device_uuid, device_role)
 
     async def on_ws_packet(
             self,
@@ -526,14 +644,14 @@ class IPCEngine:
                 self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
             case IPCPayloadType.DISCOVERY:
                 logger.warning("We aren't supposed to be able to handle discovery here?")
-            # case IPCPayloadType.ROLE_ADD:
-            #     self.events.dispatch("ipc_role_added", packet, node_uuid)
-            # case IPCPayloadType.ROLE_REMOVE:
-            #     self.events.dispatch("ipc_role_removed", packet, node_uuid)
-            # case IPCPayloadType.DEVICE_ADD:
-            #     self.events.dispatch("ipc_device_added", packet, node_uuid)
-            # case IPCPayloadType.DEVICE_REMOVE:
-            #     self.events.dispatch("ipc_device_removed", packet, node_uuid)
+            case IPCPayloadType.ROLE_ADD:
+                self.events.dispatch(EngineEvents.EXTERNAL_ROLE_ADDED, packet, node_uuid)
+            case IPCPayloadType.ROLE_REMOVE:
+                self.events.dispatch(EngineEvents.EXTERNAL_ROLE_REMOVED, packet, node_uuid)
+            case IPCPayloadType.DEVICE_ADD:
+                self.events.dispatch(EngineEvents.EXTERNAL_DEVICE_ADDED, packet, node_uuid)
+            case IPCPayloadType.DEVICE_REMOVE:
+                self.events.dispatch(EngineEvents.EXTERNAL_DEVICE_REMOVED, packet, node_uuid)
             case _:
                 logger.warning(
                     "Unknown WS IPC message type encountered from node %s: %s", node_uuid, packet.type
@@ -546,13 +664,13 @@ class IPCEngine:
         )
         # logger.debug(packet.data)
 
-    async def add_role(self, role: Role):
+    def add_role(self, role: Role):
         if role.name in self._roles:
             raise ValueError(f"A role with name {role.name} has already been added.")
 
         self._roles[role.name] = role
         role.set_engine(self)
-        if self.session is not None:
+        if self.running.is_set():
             packet = IPCPacket(
                 payload_type=IPCPayloadType.ROLE_ADD,
                 origin_type=IPCClassType.ENGINE,
@@ -562,14 +680,20 @@ class IPCEngine:
                 dest_name=None,
                 data=role.name,
             )
-            await self.propagate_to_nodes(packet)
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.broadcast_to_nodes(packet))
+
+    async def start(self):
+        self.running.set()
+        self.events.dispatch(EngineEvents.ENGINE_READY)
+        logger.debug("IPC Engine started.")
 
     async def close(self, closing_time: float = 1.0):
         self.events.dispatch(EngineEvents.ENGINE_CLOSING)
         await self.session.close()
         await asyncio.sleep(closing_time)
 
-    async def start(self, *, port: int = 8080, discover_nodes: list[tuple[str, int]] | None = None) -> web.BaseSite:
+    async def start_server(self, *, port: int = 8080, discover_nodes: list[tuple[str, int]] | None = None) -> web.BaseSite:
         self.session = aiohttp.ClientSession()
         app = web.Application(middlewares=[self.ipc_middleware()])
         runner = web.AppRunner(app)
@@ -577,8 +701,8 @@ class IPCEngine:
         site = web.TCPSite(runner, "0.0.0.0", port=port, shutdown_timeout=5.0)
         await site.start()
         logger.info("%s listening on %s.", self.__class__.__name__, site.name)
-
-        self.events.dispatch(EngineEvents.ENGINE_READY)
+        await self.start()
+        # self.events.dispatch(EngineEvents.ENGINE_READY)
         if discover_nodes:
             loop = asyncio.get_running_loop()
             for node_address, node_port in discover_nodes:
@@ -588,7 +712,7 @@ class IPCEngine:
 
         return site
 
-    def run(
+    def run_server(
             self,
             *,
             loop: asyncio.AbstractEventLoop | None = None,
@@ -597,7 +721,7 @@ class IPCEngine:
             discover_nodes: list[tuple[str, int]] | None = None
     ):
         loop = loop or asyncio.new_event_loop()
-        task = loop.create_task(self.start(port=port, discover_nodes=discover_nodes))
+        task = loop.create_task(self.start_server(port=port, discover_nodes=discover_nodes))
         try:
             loop.run_forever()
         except KeyboardInterrupt:
