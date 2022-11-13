@@ -549,6 +549,7 @@ class IPCEngine:
     ):
         # logger.debug("Node %s informed us of role %s, adding.", node_uuid, packet.data)
         self.map.add_external_role(packet.data, node_uuid)
+        self.events.dispatch(EngineEvents.ROLE_ADDED, packet.data, node_uuid)
 
     async def on_local_role_added(self, role: Role):
         self.events.dispatch(EngineEvents.ROLE_ADDED, role.name, self.uuid)
@@ -565,7 +566,7 @@ class IPCEngine:
             await self.broadcast_to_nodes(packet)
 
     async def on_role_added(self, role_name: str, node_uuid: str):
-        logger.debug("Node %s now has role %s", node_uuid, role_name)
+        logger.debug("New Role %s from Node %s", role_name, node_uuid)
 
     async def on_external_role_removed(
             self,

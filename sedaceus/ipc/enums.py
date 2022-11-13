@@ -77,3 +77,13 @@ class IPCPayloadType(Enum):
 
     Packet data: {"uuid": "Device UUID Here", "role": "Role name here"}
     """
+    COMMUNICATION_REDIRECT = 6
+    """Valid destination: ENGINE, ROLE, DEVICE (specifically, origin_type of the IPCConnection to redirect)
+    
+    Packet data: {
+        "destination_type": IPCClassType.value, 
+        "destination_name": "UUID/name here", 
+        "destination_node": "Node UUID"
+        "original_data": Original communication packet data.
+    }
+    """
