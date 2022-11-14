@@ -8,8 +8,8 @@ from aiohttp import web
 from logging import getLogger
 from typing import Coroutine, TYPE_CHECKING
 
-from .connection import IPCConnection, IPCPacket
-from .enums import EngineEvents, IPCClassType, IPCPayloadType
+from .connection import IPCConnection, IPCCore, IPCPacket
+from .enums import CoreEvents, EngineEvents, IPCClassType, IPCPayloadType
 
 from ..core import DispatchFramework
 
@@ -211,6 +211,24 @@ class ConnectionMap:
         else:
             raise ValueError(f"No Nodes, Roles, or Devices found with the UUID or name of {uuid_or_name}")
 
+    def get_requestor_info(self, requestor: IPCEngine | Role | Device) -> tuple[IPCClassType, str, str | None]:
+        if isinstance(requestor, IPCEngine):
+            origin_type = IPCClassType.ENGINE
+            origin_name = requestor.uuid
+            origin_role = None
+        elif isinstance(requestor, Role):
+            origin_type = IPCClassType.ROLE
+            origin_name = requestor.name
+            origin_role = None
+        elif isinstance(requestor, Device):
+            origin_type = IPCClassType.DEVICE
+            origin_name = requestor.uuid
+            origin_role = requestor.role.name
+        else:
+            raise ValueError("Requester type %s is not supported.", type(requestor))
+
+        return origin_type, origin_name, origin_role
+
     def ipc_to(
             self,
             requestor: IPCEngine | Role | Device,
@@ -232,20 +250,21 @@ class ConnectionMap:
         else:
             raise ValueError(f"No Nodes, Roles, or Devices found with the UUID or name of {uuid_or_name}")
 
-        if isinstance(requestor, IPCEngine):
-            origin_type = IPCClassType.ENGINE
-            origin_name = requestor.uuid
-            origin_role = None
-        elif isinstance(requestor, Role):
-            origin_type = IPCClassType.ROLE
-            origin_name = requestor.name
-            origin_role = None
-        elif isinstance(requestor, Device):
-            origin_type = IPCClassType.DEVICE
-            origin_name = requestor.uuid
-            origin_role = requestor.role.name
-        else:
-            raise ValueError("Requester type %s is not supported.", type(requestor))
+        # if isinstance(requestor, IPCEngine):
+        #     origin_type = IPCClassType.ENGINE
+        #     origin_name = requestor.uuid
+        #     origin_role = None
+        # elif isinstance(requestor, Role):
+        #     origin_type = IPCClassType.ROLE
+        #     origin_name = requestor.name
+        #     origin_role = None
+        # elif isinstance(requestor, Device):
+        #     origin_type = IPCClassType.DEVICE
+        #     origin_name = requestor.uuid
+        #     origin_role = requestor.role.name
+        # else:
+        #     raise ValueError("Requester type %s is not supported.", type(requestor))
+        origin_type, origin_name, origin_role = self.get_requestor_info(requestor)
 
         ret = IPCConnection(
             engine=self._engine,
@@ -261,9 +280,10 @@ class ConnectionMap:
         return ret
 
 
-class IPCEngine:
+class IPCEngine(IPCCore):
     def __init__(self, uuid_override: str | None = None):
-        self.events: DispatchFramework = DispatchFramework()
+        # self.events: DispatchFramework = DispatchFramework()
+        super().__init__()
         self._uuid: str = uuid_override or uuid.uuid1().hex
         # self._connected_nodes: dict[str, web.WebSocketResponse | aiohttp.ClientWebSocketResponse] = {}
         self._roles: dict[str, Role] = {}
@@ -315,6 +335,10 @@ class IPCEngine:
                 ret[dev_uuid] = device
 
         return ret
+
+    @property
+    def engine(self) -> IPCEngine:
+        return self
 
     def discovery_payload(self) -> IPCPacket:
         ret = IPCPacket(
@@ -432,7 +456,7 @@ class IPCEngine:
                         else:
                             logger.debug("Unhandled non-text message received, discarding.")
 
-                logger.warning("Outgoing connection closed cleanly, perhaps you should dispatch something someday?")
+                # logger.warning("Outgoing connection closed cleanly, perhaps you should dispatch something someday?")
                 self.map.clean()
 
             except (aiohttp.ClientConnectorError, ConnectionRefusedError) as e:
@@ -516,7 +540,7 @@ class IPCEngine:
                         # logger.debug("Incoming Node %s sent a message, dispatching.", node_uuid)
                         self.events.dispatch(EngineEvents.WS_PACKET, ws, packet, node_uuid)
 
-        logger.warning("Incoming connection closed cleanly, perhaps you should dispatch something someday?")
+        # logger.warning("Incoming connection closed cleanly, perhaps you should dispatch something someday?")
         self.map.clean()
 
         return ws
@@ -642,6 +666,15 @@ class IPCEngine:
     async def on_packet(self, packet: IPCPacket, node_uuid: str):
         match packet.type:
             case IPCPayloadType.COMMUNICATION:
+                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+            case IPCPayloadType.COMMUNICATION_REQUEST:
+                # self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+                self.events.dispatch(CoreEvents.INCOMING_CONNECTION, packet, node_uuid)
+            case IPCPayloadType.COMMUNICATION_ACCEPTED:
+                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+            case IPCPayloadType.COMMUNICATION_DENIED:
+                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+            case IPCPayloadType.COMMUNICATION_REDIRECT:
                 self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
             case IPCPayloadType.DISCOVERY:
                 logger.warning("We aren't supposed to be able to handle discovery here?")

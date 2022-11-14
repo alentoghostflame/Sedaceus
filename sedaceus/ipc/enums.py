@@ -2,10 +2,16 @@ from enum import Enum, unique
 
 
 __all__ = (
+    "CoreEvents",
     "EngineEvents",
     "IPCClassType",
     "IPCPayloadType",
 )
+
+
+class CoreEvents(Enum):
+    INCOMING_CONNECTION = "INCOMING_CONNECTION"
+    CONNECTION = "CONNECTION"
 
 
 class EngineEvents(Enum):
@@ -77,7 +83,22 @@ class IPCPayloadType(Enum):
 
     Packet data: {"uuid": "Device UUID Here", "role": "Role name here"}
     """
-    COMMUNICATION_REDIRECT = 6
+    COMMUNICATION_REQUEST = 6
+    """Valid destination: ENGINE, ROLE, DEVICE
+    
+    Packet data: None
+    """
+    COMMUNICATION_ACCEPTED = 7
+    """Valid destination: ENGINE, ROLE, DEVICE (specifically in response to a COMMUNICATION_REQUEST)
+    
+    Packet data: UUID of the REQUESTing IPCConnection
+    """
+    COMMUNICATION_DENIED = 8
+    """Valid destination: ENGINE, ROLE, DEVICE (specifically in response to a COMMUNICATION_REQUEST)
+
+    Packet data: UUID of the REQUESTing IPCConnection
+    """
+    COMMUNICATION_REDIRECT = 9
     """Valid destination: ENGINE, ROLE, DEVICE (specifically, origin_type of the IPCConnection to redirect)
     
     Packet data: {
