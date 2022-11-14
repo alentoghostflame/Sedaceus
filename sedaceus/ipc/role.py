@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 import uuid
 
 from .enums import EngineEvents
+from .connection import IPCChat, IPCCore
+from . import connection
 from ..core import DispatchFramework
 
 
@@ -22,9 +24,10 @@ __all__ = (
 logger = getLogger(__name__)
 
 
-class Role:
+class Role(connection.IPCCore):
     def __init__(self, name: str):
-        self.events: DispatchFramework = DispatchFramework()
+        # self.events: DispatchFramework = DispatchFramework()
+        super().__init__()
         # self._uuid: str = uuid_override or uuid.uuid1().hex
         self._name: str = name
         self._engine: IPCEngine | None = None
@@ -61,3 +64,6 @@ class Role:
         device.set_role(self)
         if self.engine and self.engine.running.is_set():
             self.engine.events.dispatch(EngineEvents.LOCAL_DEVICE_ADDED, device)
+
+    async def on_connection(self, conn: connection.IPCChat):
+        raise NotImplementedError

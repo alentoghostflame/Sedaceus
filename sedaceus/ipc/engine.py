@@ -8,7 +8,7 @@ from aiohttp import web
 from logging import getLogger
 from typing import Coroutine, TYPE_CHECKING
 
-from .connection import IPCConnection, IPCCore, IPCPacket
+from .connection import IPCChat, IPCConnection, IPCCore, IPCPacket, get_requestor_info
 from .enums import CoreEvents, EngineEvents, IPCClassType, IPCPayloadType
 
 from ..core import DispatchFramework
@@ -211,29 +211,22 @@ class ConnectionMap:
         else:
             raise ValueError(f"No Nodes, Roles, or Devices found with the UUID or name of {uuid_or_name}")
 
-    def get_requestor_info(self, requestor: IPCEngine | Role | Device) -> tuple[IPCClassType, str, str | None]:
-        if isinstance(requestor, IPCEngine):
-            origin_type = IPCClassType.ENGINE
-            origin_name = requestor.uuid
-            origin_role = None
-        elif isinstance(requestor, Role):
-            origin_type = IPCClassType.ROLE
-            origin_name = requestor.name
-            origin_role = None
-        elif isinstance(requestor, Device):
-            origin_type = IPCClassType.DEVICE
-            origin_name = requestor.uuid
-            origin_role = requestor.role.name
+    def get_packet_destination(self, packet: IPCPacket) -> IPCEngine | Role | Device:
+        if packet.destination_type is IPCClassType.ENGINE:
+            return self._engine
+        elif packet.destination_type is IPCClassType.ROLE:
+            return self._engine.roles[packet.destination_name]
+        elif packet.destination_type is IPCClassType.DEVICE:
+            return self._engine.devices[packet.destination_name]
         else:
-            raise ValueError("Requester type %s is not supported.", type(requestor))
+            raise ValueError(f"Cannot handle destination type %s.", packet.destination_type)
 
-        return origin_type, origin_name, origin_role
-
-    def ipc_to(
-            self,
-            requestor: IPCEngine | Role | Device,
-            uuid_or_name: str
-    ) -> IPCConnection:
+    def get_destination_info_of(self, uuid_or_name: str) -> tuple[
+        aiohttp.ClientWebSocketResponse | web.WebSocketResponse | None,
+        str,
+        IPCClassType,
+        str
+    ]:
         if uuid_or_name in self.nodes:
             conn = self.resolve_node_conn(uuid_or_name)
             dest_node = uuid_or_name
@@ -250,21 +243,16 @@ class ConnectionMap:
         else:
             raise ValueError(f"No Nodes, Roles, or Devices found with the UUID or name of {uuid_or_name}")
 
-        # if isinstance(requestor, IPCEngine):
-        #     origin_type = IPCClassType.ENGINE
-        #     origin_name = requestor.uuid
-        #     origin_role = None
-        # elif isinstance(requestor, Role):
-        #     origin_type = IPCClassType.ROLE
-        #     origin_name = requestor.name
-        #     origin_role = None
-        # elif isinstance(requestor, Device):
-        #     origin_type = IPCClassType.DEVICE
-        #     origin_name = requestor.uuid
-        #     origin_role = requestor.role.name
-        # else:
-        #     raise ValueError("Requester type %s is not supported.", type(requestor))
-        origin_type, origin_name, origin_role = self.get_requestor_info(requestor)
+        return conn, dest_node, dest_type, dest_name
+
+    def ipc_conn_to(
+            self,
+            requestor: IPCEngine | Role | Device,
+            uuid_or_name: str
+    ) -> IPCConnection:
+
+        conn, dest_node, dest_type, dest_name = self.get_destination_info_of(uuid_or_name)
+        origin_type, origin_name, origin_role = get_requestor_info(requestor)
 
         ret = IPCConnection(
             engine=self._engine,
@@ -276,7 +264,18 @@ class ConnectionMap:
             dest_type=dest_type,
             dest_name=dest_name
         )
+        return ret
 
+    def ipc_chat_to(self, requestor: IPCEngine | Role | Device, uuid_or_name: str, dest_chat_uuid: str | None = None):
+        conn, dest_node, dest_type, dest_name = self.get_destination_info_of(uuid_or_name)
+        ret = IPCChat(
+            requestor=requestor,
+            conn=conn,
+            dest_node=dest_node,
+            dest_type=dest_type,
+            dest_name=dest_name,
+            dest_chat_uuid=dest_chat_uuid,
+        )
         return ret
 
 
@@ -317,7 +316,7 @@ class IPCEngine(IPCCore):
         self.events.add_listener(self.on_ws_packet, EngineEvents.WS_PACKET)
         self.events.add_listener(self.on_local_packet, EngineEvents.LOCAL_PACKET)
         self.events.add_listener(self.on_packet, EngineEvents.PACKET)
-        self.events.add_listener(self.on_communication, EngineEvents.COMMUNICATION)
+        # self.events.add_listener(self.on_communication, EngineEvents.COMMUNICATION)
 
     @property
     def uuid(self) -> str:
@@ -385,14 +384,19 @@ class IPCEngine(IPCCore):
             await ws.send_json(packet.to_dict())
 
     async def update_node(self, node_uuid: str):
-        ipc_conn = self.map.ipc_to(self, node_uuid)
-        if ipc_conn is None:
+        if node_uuid is None or node_uuid == self.uuid:
             raise ValueError("Cannot update with self?? What are you trying to do?")
+
+        # ipc_conn = self.map.ipc_conn_to(self, node_uuid)
+        # if ipc_conn is None:
+        #     raise ValueError("Cannot update with self?? What are you trying to do?")
 
         # This prevents roles/devices added while running through this from breaking anything.
         current_roles = self.roles
         current_devices = self.devices
-        async with ipc_conn as conn:
+        # async with ipc_conn as conn:
+        async with self.map.ipc_conn_to(self, node_uuid) as conn:
+
             for role_name in current_roles:
                 packet = IPCPacket(
                     payload_type=IPCPayloadType.ROLE_ADD,
@@ -666,16 +670,29 @@ class IPCEngine(IPCCore):
     async def on_packet(self, packet: IPCPacket, node_uuid: str):
         match packet.type:
             case IPCPayloadType.COMMUNICATION:
-                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+                dest = self.map.get_packet_destination(packet)
+                logger.debug("Chat communication received, routing to %s", dest)
+                dest.events.dispatch(CoreEvents.CHAT_MESSAGE, packet, node_uuid)
             case IPCPayloadType.COMMUNICATION_REQUEST:
-                # self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
-                self.events.dispatch(CoreEvents.INCOMING_CONNECTION, packet, node_uuid)
+                dest = self.map.get_packet_destination(packet)
+                logger.debug("Chat communication request received, routing to %s", dest)
+                dest.events.dispatch(CoreEvents.INCOMING_CHAT, packet, node_uuid)
+                # TODO: Put in logic to route to the correct place.
             case IPCPayloadType.COMMUNICATION_ACCEPTED:
-                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+                dest = self.map.get_packet_destination(packet)
+                logger.debug("Chat communication acceptance received, routing to %s", dest)
+                dest.events.dispatch(CoreEvents.CHAT_MESSAGE, packet, node_uuid)
+                # TODO: Put in logic to route to the correct place.
             case IPCPayloadType.COMMUNICATION_DENIED:
-                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+                dest = self.map.get_packet_destination(packet)
+                logger.debug("Chat communication denial received, routing to %s", dest)
+                dest.events.dispatch(CoreEvents.CHAT_MESSAGE, packet, node_uuid)
+                # TODO: Put in logic to route to the correct place.
             case IPCPayloadType.COMMUNICATION_REDIRECT:
-                self.events.dispatch(EngineEvents.COMMUNICATION, packet, node_uuid)
+                dest = self.map.get_packet_destination(packet)
+                logger.debug("Chat communication redirect received, routing to %s", dest)
+                dest.events.dispatch(CoreEvents.CHAT_MESSAGE, packet, node_uuid)
+                # TODO: Put in logic to route to the correct place.
             case IPCPayloadType.DISCOVERY:
                 logger.warning("We aren't supposed to be able to handle discovery here?")
             case IPCPayloadType.ROLE_ADD:
@@ -691,12 +708,12 @@ class IPCEngine(IPCCore):
                     "Unknown WS IPC message type encountered from node %s: %s", node_uuid, packet.type
                 )
 
-    async def on_communication(self, packet: IPCPacket, origin_node: str | None):
-        logger.debug(
-            "Communication from node %s for destination type %s, destination name %s received.",
-            origin_node, packet.destination_type.name, packet.destination_name
-        )
-        # logger.debug(packet.data)
+    # async def on_communication(self, packet: IPCPacket, origin_node: str | None):
+    #     logger.debug(
+    #         "Communication from node %s for destination type %s, destination name %s received.",
+    #         origin_node, packet.destination_type.name, packet.destination_name
+    #     )
+    #     # logger.debug(packet.data)
 
     def add_role(self, role: Role):
         if role.name in self._roles:

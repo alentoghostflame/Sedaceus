@@ -9,9 +9,11 @@ __all__ = (
 )
 
 
+@unique
 class CoreEvents(Enum):
-    INCOMING_CONNECTION = "INCOMING_CONNECTION"
-    CONNECTION = "CONNECTION"
+    INCOMING_CHAT = "INCOMING_CHAT"
+    CHAT_CONNECTION = "CHAT_CONNECTION"
+    CHAT_MESSAGE = "CHAT_MESSAGE"
 
 
 class EngineEvents(Enum):
@@ -41,7 +43,7 @@ class EngineEvents(Enum):
     WS_PACKET = "WS_PACKET"
     LOCAL_PACKET = "LOCAL_PACKET"
     PACKET = "PACKET"
-    COMMUNICATION = "COMMUNICATION"
+    # COMMUNICATION = "COMMUNICATION"
 
 
 @unique
