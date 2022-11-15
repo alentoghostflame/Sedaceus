@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 import uuid
 
+from . import connection
 from ..core import DispatchFramework
 
 
@@ -21,9 +22,9 @@ __all__ = (
 logger = getLogger(__name__)
 
 
-class Device:
+class Device(connection.IPCCore):
     def __init__(self, uuid_override: str | None = None):
-        self.events: DispatchFramework = DispatchFramework()
+        super().__init__()
         self._uuid: str = uuid_override or uuid.uuid1().hex
         self._engine: IPCEngine | None = None
         """Set when the Device is added to an Engine."""

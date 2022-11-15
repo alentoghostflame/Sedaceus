@@ -225,6 +225,7 @@ class IPCConnection:
             self._is_open = True
             # self._engine.events.add_listener(self.on_ipc_communication, EngineEvents.COMMUNICATION)
             self._engine.events.add_listener(self._on_engine_close, EngineEvents.ENGINE_CLOSING)
+            self._engine.events.add_listener(self._on_node_removed, EngineEvents.NODE_REMOVED)
             # if self._sent_comm_request is False:
             #     await self._send_comm_request()
             #     self._sent_comm_request = True
@@ -245,6 +246,7 @@ class IPCConnection:
         # self._ready_to_continue.clear()
         # self._engine.events.remove_listener(self.on_ipc_communication, "ipc_communication")
         self._engine.events.remove_listener(self._on_engine_close, EngineEvents.ENGINE_CLOSING)
+        self._engine.events.remove_listener(self._on_node_removed, EngineEvents.NODE_REMOVED)
         # await self._packet_queue.put(None)
         return True
         # else:
@@ -258,6 +260,10 @@ class IPCConnection:
 
     async def _on_engine_close(self):
         await self.close()
+
+    async def _on_node_removed(self, node_uuid: str):
+        if node_uuid == self.dest_node:
+            await self.close()
 
     # async def _send_comm_request(self):
     #     comm_request = IPCPacket.from_conn(self, IPCPayloadType.COMMUNICATION_REQUEST, None)
@@ -274,7 +280,8 @@ class IPCConnection:
             raise self.ConnectionClosed("The IPC connection has been closed.")
 
         if self._conn is None:
-            self._engine.events.dispatch(EngineEvents.COMMUNICATION, packet, self._origin_name)
+            # self._engine.events.dispatch(EngineEvents.COMMUNICATION, packet, self._origin_name)
+            self._engine.events.dispatch(EngineEvents.PACKET, packet, self._origin_name)
         else:
             try:
                 await self._conn.send_json(packet.to_dict())
@@ -456,6 +463,21 @@ class IPCChat(IPCConnection):
         self._ready_for_communication.set()
         await self.close()
 
+    async def redirect_chat_request(self, dest_type: IPCClassType, dest_name: str, dest_node: str, dest_chat_uuid: str):
+        payload = {
+            "destination_type": dest_type.value, "destination_name": dest_name, "destination_node": dest_node
+        }
+        packet = IPCPacket.from_connection(self, IPCPayloadType.COMMUNICATION_REDIRECT, payload)
+        packet.dest_conn_uuid = dest_chat_uuid
+        self._dest_chat_uuid = dest_chat_uuid
+        self._sent_chat_request = True
+        await self.open()
+        self._is_open = True
+        await self.send_packet(packet)
+        self._chat_denied = True
+        self._ready_for_communication.set()
+        await self.close()
+
     async def send_chat(self, data: ConnDataTypes):
         """Sends a communication data packet."""
         packet = IPCPacket.from_connection(self, IPCPayloadType.COMMUNICATION, data=data)
@@ -509,14 +531,14 @@ class IPCChat(IPCConnection):
                         self._dest_chat_uuid = packet.origin_conn_uuid
                         self._ready_for_communication.set()
                     case IPCPayloadType.COMMUNICATION_DENIED:
-                        logger.critical("COMM %s DENIED", self.uuid)
+                        # logger.critical("COMM %s DENIED", self.uuid)
                         # logger.critical("WE WERE DENIED!")
                         self._chat_denied = True
                         self._ready_for_communication.set()
                         await self.close(force=True)
                     case IPCPayloadType.COMMUNICATION_REDIRECT:
                         # logger.critical("COMM REDIRECTED")
-                        dest_type = packet.data["destination_type"]
+                        dest_type = IPCClassType(packet.data["destination_type"])
                         dest_name = packet.data["destination_name"]
                         dest_node = packet.data["destination_node"]
                         await self.change_dest(dest_node, dest_type, dest_name)
@@ -545,14 +567,8 @@ class IPCCore:
             self.events.dispatch(CoreEvents.CHAT_CONNECTION, conn)
         else:
             logger.debug("Incoming connection locally denied. Creating conn, sending deny, and ignoring.")
-            # conn = IPCConnection.from_packet(self, packet, node_uuid)
-            # await conn.open()
-            # deny_packet = IPCPacket.from_connection(conn, IPCPayloadType.COMMUNICATION_DENIED, packet.origin_conn_uuid)
-            # await conn.send_packet(deny_packet)
-            # await conn.close()
             conn = IPCChat.from_packet(self, packet, node_uuid)
             await conn.deny_chat_request(packet.origin_conn_uuid)
-
 
     # noinspection PyMethodMayBeStatic
     async def accept_incoming_chat(self, packet: IPCPacket, node_uuid: str) -> bool:

@@ -78,7 +78,7 @@ class ConnectionMap:
     def local_devices(self) -> set:
         ret = set()
         for role in self._engine._roles.values():
-            for device in role.devices.values():
+            for device in role.local_devices.values():
                 ret.add(device.uuid)
 
         return ret
@@ -330,7 +330,7 @@ class IPCEngine(IPCCore):
     def devices(self) -> dict[str, Device]:
         ret = {}
         for role in self.roles.values():
-            for dev_uuid, device in role.devices.items():
+            for dev_uuid, device in role.local_devices.items():
                 ret[dev_uuid] = device
 
         return ret
@@ -391,7 +391,7 @@ class IPCEngine(IPCCore):
         # if ipc_conn is None:
         #     raise ValueError("Cannot update with self?? What are you trying to do?")
 
-        # This prevents roles/devices added while running through this from breaking anything.
+        # This prevents roles/devices that are added while running through this from breaking anything.
         current_roles = self.roles
         current_devices = self.devices
         # async with ipc_conn as conn:

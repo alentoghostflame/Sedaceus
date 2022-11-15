@@ -107,6 +107,5 @@ class IPCPayloadType(Enum):
         "destination_type": IPCClassType.value, 
         "destination_name": "UUID/name here", 
         "destination_node": "Node UUID"
-        "original_data": Original communication packet data.
     }
     """
