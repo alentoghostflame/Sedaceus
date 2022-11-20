@@ -102,7 +102,7 @@ class InteractionEndpoint:
 
         return interaction_endpoint_middleware
 
-    async def start(self, public_key: str, *, port: int = 8080, route: str = DEFAULT_ROUTE):
+    async def start(self, public_key: str, *, port: int = 8080, route: str = DEFAULT_ROUTE) -> web.TCPSite:
         app = web.Application(middlewares=[self.middleware(public_key, route)])
         runner = web.AppRunner(app)
         await runner.setup()
@@ -110,6 +110,7 @@ class InteractionEndpoint:
         self.events.add_listener(self.handle_ping, "ping")
         await site.start()
         logger.info("%s listening on %s on route %s", self.__class__.__name__, site.name, self._route)
+        return site
 
     def run(
             self,
